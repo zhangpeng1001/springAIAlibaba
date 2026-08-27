@@ -41,10 +41,13 @@ $env:OPENAI_API_KEY = "你的密钥"
 # 请填写服务根地址，不要添加 /v1；当前 Spring AI 客户端会自动追加 /v1/chat/completions。
 $env:OPENAI_BASE_URL = "https://你的兼容端点"
 $env:OPENAI_MODEL = "你的模型名"
+# 深度研究可能较慢，默认读取超时 300 秒；可按供应商响应速度调整
+$env:LLM_READ_TIMEOUT_SECONDS = "300"
 mvn -f backend/pom.xml spring-boot:run
 ```
 
 如使用官方 OpenAI，`OPENAI_BASE_URL` 可省略。即使误填了末尾 `/v1`，后端也会在启动时自动清理并记录规范化后的根地址。密钥只从环境变量读取，绝不写入仓库。
+模型 TCP 建连超时默认为 10 秒、响应读取超时默认为 300 秒；两者只限制单次 HTTP 调用，不限制整个工作流时长。
 
 ## 排障日志
 

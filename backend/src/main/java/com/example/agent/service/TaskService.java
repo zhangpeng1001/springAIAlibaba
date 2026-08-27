@@ -127,6 +127,8 @@ public class TaskService {
         AgentState state = stateStore.update(taskId, s -> {
             require(s.getStatus() == TaskStatus.WAITING_USER_PLAN, "PLAN_CONFIRM_FAILED", "当前任务不在等待纲要确认状态");
             require(s.getCurrentPlan() != null, "PLAN_CONFIRM_FAILED", "当前纲要不存在");
+            // 确认请求必须是一次性动作；在浏览器重复点击或网络重试的竞态下，第二次请求不能再次提交 AUTO 工作流。
+            require(!s.isPlanConfirmed(), "PLAN_CONFIRM_FAILED", "纲要已经确认，不能重复提交");
             require(s.getPlanVersion() == planVersion && s.getCurrentPlan().version() == planVersion,
                     "PLAN_CONFIRM_FAILED", "确认的纲要版本已过期");
             s.setPlanConfirmed(true);
