@@ -20,11 +20,29 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class TaskService {
+    /**
+     * 唯一业务状态仓库。
+     * 所有 API 状态校验都必须基于刚从磁盘读取的状态，不能依赖 Controller 或前端缓存。
+     */
     private final TaskStateStore stateStore;
+    /** 负责追加审计日志并向已连接浏览器分发 SSE 事件。 */
     private final TaskEventService events;
+    /** 已编译的 StateGraph，负责把 INITIAL、REVISE、AUTO 三种调用模式连接到正确节点。 */
     private final AgentWorkflow workflow;
+    /**
+     * 后台执行器。
+     * HTTP 接口只提交任务并返回 202，避免浏览器连接被长时间的 LLM 调用占用。
+     */
     private final ExecutorService executor;
 
+    /**
+     * 注入任务门面依赖。
+     *
+     * @param stateStore 文件系统状态仓库
+     * @param events SSE 与 JSONL 事件服务
+     * @param workflow 任务流程图
+     * @param agentExecutor 受限并发后台执行器
+     */
     public TaskService(TaskStateStore stateStore, TaskEventService events, AgentWorkflow workflow,
                        ExecutorService agentExecutor) {
         this.stateStore = stateStore;
@@ -33,7 +51,14 @@ public class TaskService {
         this.executor = agentExecutor;
     }
 
-    /** 创建任务并异步运行“分析 → 初始纲要 → 等待人工”的图分支。 */
+    /**
+     * 创建任务并异步运行“分析 → 初始纲要 → 等待人工”的图分支。
+     *
+     * <p>必须先落盘再发送 TASK_CREATED 事件，否则浏览器在收到事件后立刻请求详情可能找不到状态文件。</p>
+     *
+     * @param question 已经过 Controller 长度校验的用户问题
+     * @return 已持久化的初始任务状态；其后续状态通过 SSE 或查询接口获取
+     */
     public AgentState create(String question) {
         String taskId = createTaskId();
         AgentState state = AgentState.created(taskId, question.trim());
@@ -43,9 +68,18 @@ public class TaskService {
         return state;
     }
 
+    /**
+     * 读取某个任务的完整可恢复状态。
+     *
+     * @param taskId 任务标识
+     * @return 当前磁盘快照，不返回内存缓存
+     */
     public AgentState get(String taskId) { return load(taskId); }
 
-    /** 返回最近更新时间倒序的任务列表，供首页历史任务区域展示。 */
+    /**
+     * 返回最近更新时间倒序的任务列表，供首页历史任务区域展示。
+     * 每次均扫描 state.json，保证服务重启后历史任务仍然可见。
+     */
     public List<AgentState> list() {
         return stateStore.list().stream().sorted(Comparator.comparing(AgentState::getUpdatedAt).reversed()).toList();
     }
@@ -53,6 +87,9 @@ public class TaskService {
     /**
      * 保存待处理意见并触发 REVISE 图分支。
      * 自然语言中即使出现“确认”也不会锁定 Plan，确认只能走 confirmPlan 接口。
+     *
+     * @param taskId 当前处于 Human Gate 的任务标识
+     * @param message 用户对现有纲要的修改意见
      */
     public void revisePlan(String taskId, String message) {
         AgentState state = stateStore.update(taskId, s -> {
@@ -67,6 +104,11 @@ public class TaskService {
     /**
      * 校验客户端看到的 Plan 版本后记录显式确认，再触发自动阶段。
      * 不在本方法直接调用 LLM，保证 HTTP 请求快速返回 202。
+     *
+     * <p>版本检查用于防止用户在浏览器展示 V1 时，误把另一标签页刚更新出的 V2 锁定。</p>
+     *
+     * @param taskId 待确认任务标识
+     * @param planVersion 用户界面上显示并由用户确认的纲要版本
      */
     public void confirmPlan(String taskId, int planVersion) {
         AgentState state = stateStore.update(taskId, s -> {
@@ -80,7 +122,15 @@ public class TaskService {
         submit(taskId, "AUTO");
     }
 
-    /** 协作式取消：运行中的节点会在开始、模型返回与并行汇总点检查该标记。 */
+    /**
+     * 协作式取消任务。
+     *
+     * <p>不能强行中断正在运行的远程 HTTP 请求，因此这里只落盘取消标记；工作流节点会在开始、
+     * 模型返回与并行汇总点检查该标记，从而阻止任务继续写入后续阶段的结果。</p>
+     *
+     * @param taskId 待取消任务标识
+     * @return 写入 CANCELLED 后的任务状态
+     */
     public AgentState cancel(String taskId) {
         AgentState state = stateStore.update(taskId, s -> {
             if (s.getStatus() == TaskStatus.SUCCESS || s.getStatus() == TaskStatus.FAILED || s.getStatus() == TaskStatus.CANCELLED) {
@@ -94,7 +144,12 @@ public class TaskService {
         return state;
     }
 
-    /** 服务启动恢复：人工等待态保持等待；所有自动态从最近落盘阶段重新进入相应图分支。 */
+    /**
+     * 服务启动恢复。
+     *
+     * <p>等待人工确认的任务绝不自动继续；修订中的任务依赖 pendingPlanFeedback 重新进入 REVISE；
+     * 已确认或已锁定任务从 AUTO 入口恢复。各节点会跳过已经落盘的主题工件。</p>
+     */
     public void recoverIncompleteTasks() {
         for (AgentState state : stateStore.list()) {
             if (state.getStatus() == TaskStatus.WAITING_USER_PLAN || state.getStatus() == TaskStatus.SUCCESS
@@ -106,6 +161,12 @@ public class TaskService {
         }
     }
 
+    /**
+     * 把 Graph 调用提交到后台，并把任何未被业务节点消化的异常统一转换为 FAILED 状态。
+     *
+     * @param taskId 任务标识
+     * @param mode Graph 入口模式
+     */
     private void submit(String taskId, String mode) {
         executor.submit(() -> {
             try {
@@ -116,6 +177,10 @@ public class TaskService {
         });
     }
 
+    /**
+     * 将后台异常固化为可观察失败状态，并发送终态事件。
+     * 已取消任务不应被较晚返回的 LLM 异常覆盖为 FAILED，因此先检查取消标记。
+     */
     private void fail(String taskId, Exception ex) {
         AgentState latest;
         try { latest = stateStore.load(taskId); } catch (Exception ignored) { return; }
@@ -133,15 +198,24 @@ public class TaskService {
         events.publish(taskId, "TASK_FAILED", failed.getCurrentNode(), Map.of("errorCode", code, "message", message));
     }
 
+    /** 将底层状态文件不存在/损坏异常转为统一的 TASK_NOT_FOUND API 语义。 */
     private AgentState load(String taskId) {
         try { return stateStore.load(taskId); }
         catch (IllegalArgumentException ex) { throw new TaskException("TASK_NOT_FOUND", "任务不存在: " + taskId); }
     }
 
+    /**
+     * 生成同时可读、可排序且低碰撞的任务目录名。
+     * 日期便于人工排查，UUID 短片段避免同一天并发创建任务冲突。
+     */
     private String createTaskId() {
         return "task-" + LocalDate.now().format(DateTimeFormatter.BASIC_ISO_DATE) + "-"
                 + UUID.randomUUID().toString().substring(0, 8);
     }
 
+    /**
+     * 统一业务前置条件校验。
+     * 条件失败时必须携带稳定错误码，前端据此展示正确操作提示，而不是解析异常文本。
+     */
     private void require(boolean condition, String code, String message) { if (!condition) throw new TaskException(code, message); }
 }
