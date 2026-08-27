@@ -10,7 +10,6 @@ import java.util.function.Consumer;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
-import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.stereotype.Component;
 
 /**
@@ -211,12 +210,15 @@ public class AgentWorkflow {
      * @param args 未使用的命令行参数
      */
     public static void main(String[] args) {
-        AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext();
-
-        AgentWorkflow bean = ctx.getBean(AgentWorkflow.class);
+        // 图拓扑在构造期固定，本方法仅用于导出 Mermaid，不启动 Spring 容器；
+        // TaskWorkflowNodes 只用于构造节点方法引用，编译与渲染阶段不会调用其节点方法，因此依赖可传 null。
+        TaskWorkflowNodes nodes = new TaskWorkflowNodes(null, null, null, null, null, null, null, null);
+        AgentWorkflow workflow = new AgentWorkflow(nodes);
         // 导出 Mermaid
-        String mermaid = bean.graph.getGraph(GraphRepresentation.Type.MERMAID).content();
-        System.out.println(mermaid);
-        ctx.close();
+//        String mermaid = workflow.graph.getGraph(GraphRepresentation.Type.MERMAID).content();
+//        System.out.println(mermaid);
+        // 导出 PLANTUML
+        String plantuml = workflow.graph.getGraph(GraphRepresentation.Type.PLANTUML).content();
+        System.out.println(plantuml);
     }
 }
