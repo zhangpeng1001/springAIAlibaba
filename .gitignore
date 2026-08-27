@@ -1,0 +1,17 @@
+/.idea/
+/.runtime-answer/
+/.runtime-data/
+
+# Java、Node 与运行时生成物不属于源代码。
+/backend/target/
+/frontend/node_modules/
+/frontend/dist/
+/frontend/*.tsbuildinfo
+/frontend/vite.config.js
+/frontend/vite.config.d.ts
+/data/
+/answer/
+*.jar
+/frontend/dist/
+/frontend/node_modules/
+/backend/target/

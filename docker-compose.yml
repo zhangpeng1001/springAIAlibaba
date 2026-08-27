@@ -1,0 +1,27 @@
+services:
+  # 单机持久化目录映射到宿主机，不引入数据库或 Redis。
+  backend:
+    build: ./backend
+    ports:
+      - "8080:8080"
+    environment:
+      AGENT_STORAGE_ROOT: /app/data
+      AGENT_ANSWER_ROOT: /app/answer
+      # 取消注释并提供密钥后启用真实 OpenAI-compatible 模型。
+      # SPRING_PROFILES_ACTIVE: openai
+      # OPENAI_API_KEY: ${OPENAI_API_KEY}
+      # OPENAI_BASE_URL: ${OPENAI_BASE_URL}
+      # OPENAI_MODEL: ${OPENAI_MODEL}
+    volumes:
+      - ./data:/app/data
+      - ./answer:/app/answer
+
+  frontend:
+    build: ./frontend
+    ports:
+      - "5173:5173"
+    environment:
+      # 浏览器仍访问 localhost:5173；Vite 在容器内将 API 转发到后端服务名。
+      VITE_API_PROXY_TARGET: http://backend:8080
+    depends_on:
+      - backend
