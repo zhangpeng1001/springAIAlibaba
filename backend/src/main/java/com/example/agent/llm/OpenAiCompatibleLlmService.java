@@ -15,6 +15,7 @@ import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
+import java.util.List;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.converter.CompositeResponseTextCleaner;
@@ -150,6 +151,20 @@ public class OpenAiCompatibleLlmService implements LlmService {
         return call("researcher/system.txt", "原始问题：\n" + question + "\n\n锁定 Plan：\n" + json(plan) + "\n\n当前主题：\n" + json(item), ResearchResult.class);
     }
 
+    /**
+     * 将失败结果和审核意见一并交给研究修复 Prompt。
+     *
+     * <p>不能仅再次调用 {@link #research(String, Plan, PlanItem)}：那样模型不知道上一轮在哪些点
+     * 被判定遗漏或偏题，修复回边会退化为随机重试。Prompt 同时明确只处理当前主题，防止模型
+     * 为修复一个问题而改变用户已经锁定的 Plan。</p>
+     */
+    @Override public ResearchResult repairResearch(String question, Plan plan, PlanItem item, ResearchResult previous,
+                                                   List<ReviewResult.Issue> issues) {
+        return call("researcher/repair.txt", "原始问题：\n" + question + "\n\n锁定 Plan：\n" + json(plan)
+                + "\n\n当前主题：\n" + json(item) + "\n\n上一版研究结果：\n" + json(previous)
+                + "\n\n必须解决的审核问题：\n" + json(issues), ResearchResult.class);
+    }
+
     /** 研究审核结果仅用于覆盖、偏题等质量判断，不能修改 Plan 本身。 */
     @Override public ReviewResult reviewResearch(Plan plan, PlanItem item, ResearchResult result) {
         return call("research-reviewer/system.txt", "Plan：\n" + json(plan) + "\n\n当前主题：\n" + json(item) + "\n\n研究结果：\n" + json(result), ReviewResult.class);
@@ -158,6 +173,17 @@ public class OpenAiCompatibleLlmService implements LlmService {
     /** 按审核通过的研究结果写作，禁止跳过研究直接凭原问题生成答案。 */
     @Override public Answer generateAnswer(Plan plan, PlanItem item, ResearchResult research) {
         return call("answer/system.txt", "锁定 Plan：\n" + json(plan) + "\n\n当前主题：\n" + json(item) + "\n\n研究结果：\n" + json(research), Answer.class);
+    }
+
+    /**
+     * 将上一版答案和审核缺口交给专用修复 Prompt，避免 Answer Repair 仅凭相同输入重复生成。
+     * 审核意见只用于补齐当前主题，不能据此新增或调整锁定 Plan 的其他主题。
+     */
+    @Override public Answer repairAnswer(Plan plan, PlanItem item, ResearchResult research, Answer previous,
+                                         List<ReviewResult.Issue> issues) {
+        return call("answer/repair.txt", "锁定 Plan：\n" + json(plan) + "\n\n当前主题：\n" + json(item)
+                + "\n\n已审核研究结果：\n" + json(research) + "\n\n上一版答案：\n" + json(previous)
+                + "\n\n必须解决的审核问题：\n" + json(issues), Answer.class);
     }
 
     /** 审核单主题答案，返回失败原因供 Answer Repair 节点使用。 */

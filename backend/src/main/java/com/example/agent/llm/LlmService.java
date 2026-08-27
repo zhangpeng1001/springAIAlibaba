@@ -2,9 +2,11 @@ package com.example.agent.llm;
 
 import com.example.agent.model.Answer;
 import com.example.agent.model.Plan;
+import com.example.agent.model.PlanItem;
 import com.example.agent.model.ResearchResult;
 import com.example.agent.model.ReviewResult;
 import com.example.agent.model.TaskAnalysis;
+import java.util.List;
 
 /**
  * LLM 能力抽象层。
@@ -38,22 +40,59 @@ public interface LlmService {
     /**
      * 只针对一个锁定主题生成研究结果，不允许扩大 Plan 范围。
      */
-    ResearchResult research(String question, Plan plan, com.example.agent.model.PlanItem item);
+    ResearchResult research(String question, Plan plan, PlanItem item);
+
+    /**
+     * 根据上一版研究结果及审核意见定向修复单个主题。
+     *
+     * <p>默认实现保留为一次普通研究，确保已有的第三方/测试实现升级接口后仍可运行；
+     * 真实模型适配器应覆写此方法，将 {@code previous} 和 {@code issues} 传入 Prompt。否则
+     * Repair 节点会在不知道失败原因的情况下盲目重生成，容易反复触发同一个审核失败。</p>
+     *
+     * @param question 原始用户问题
+     * @param plan 用户已锁定的纲要
+     * @param item 本次只允许修复的主题
+     * @param previous 上一版未通过审核的研究结果
+     * @param issues 审核器给出的定向修复问题，按持久化顺序传递
+     * @return 修复后的研究结果，调用方仍会校验主题 ID
+     */
+    default ResearchResult repairResearch(String question, Plan plan, PlanItem item, ResearchResult previous,
+                                          List<ReviewResult.Issue> issues) {
+        return research(question, plan, item);
+    }
 
     /**
      * 审核单个研究结果，返回可被 Java 路由的结构化 PASS/FAIL 结果。
      */
-    ReviewResult reviewResearch(Plan plan, com.example.agent.model.PlanItem item, ResearchResult result);
+    ReviewResult reviewResearch(Plan plan, PlanItem item, ResearchResult result);
 
     /**
      * 依据已审核的研究结果生成单个主题答案。
      */
-    Answer generateAnswer(Plan plan, com.example.agent.model.PlanItem item, ResearchResult research);
+    Answer generateAnswer(Plan plan, PlanItem item, ResearchResult research);
+
+    /**
+     * 根据上一版答案及审核意见定向修复单个主题答案。
+     *
+     * <p>与 {@link #repairResearch(String, Plan, PlanItem, ResearchResult, List)} 一样，默认回退到
+     * 普通生成以兼容已有实现；生产适配器必须覆写，使审核意见真正影响下一轮输出。</p>
+     *
+     * @param plan 用户已锁定的纲要
+     * @param item 本次只允许修复的主题
+     * @param research 已通过研究审核的依据
+     * @param previous 上一版未通过审核的答案
+     * @param issues 审核器给出的定向修复问题
+     * @return 修复后的答案，调用方仍会校验主题 ID
+     */
+    default Answer repairAnswer(Plan plan, PlanItem item, ResearchResult research, Answer previous,
+                                List<ReviewResult.Issue> issues) {
+        return generateAnswer(plan, item, research);
+    }
 
     /**
      * 审核单个主题答案，失败时问题必须可用于定向修复。
      */
-    ReviewResult reviewAnswer(com.example.agent.model.PlanItem item, Answer answer);
+    ReviewResult reviewAnswer(PlanItem item, Answer answer);
 
     /**
      * 生成候选文档标题；调用方必须再做 Java 文件名净化和路径边界校验。

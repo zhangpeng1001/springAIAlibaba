@@ -25,6 +25,7 @@ import java.nio.file.Path;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutorService;
@@ -229,7 +230,7 @@ public class TaskWorkflowNodes {
             ensureNotCancelled(taskId);
             AgentState snapshot = stateStore.load(taskId);
             ResearchResult result = llm.research(snapshot.getQuestion(), snapshot.getCurrentPlan(), item);
-            require(result != null && item.id().equals(result.topicId()), "LLM_INVALID_OUTPUT", "研究结果主题标识不匹配");
+            validateResearchResult(result, item);
             // topicId 校验通过后才可写入，避免模型把 A 主题结果覆盖到 B 主题键下。
             stateStore.update(taskId, s -> s.getResearchResults().put(item.id(), result));
             writeArtifact(taskId, "research", item.id() + ".json", result);
@@ -250,7 +251,7 @@ public class TaskWorkflowNodes {
         List<PlanItem> failed = new ArrayList<>();
         for (PlanItem item : start.getCurrentPlan().items()) {
             ResearchResult result = stateStore.load(taskId).getResearchResults().get(item.id());
-            ReviewResult review = llm.reviewResearch(start.getCurrentPlan(), item, result);
+            ReviewResult review = normalizeReviewResult(llm.reviewResearch(start.getCurrentPlan(), item, result), item);
             stateStore.update(taskId, s -> s.getReviewResults().put("research:" + item.id(), review));
             writeArtifact(taskId, "reviews", "research-" + item.id() + ".json", review);
             if (!review.passed()) failed.add(item);
@@ -278,7 +279,13 @@ public class TaskWorkflowNodes {
         events.publish(taskId, "RESEARCH_REPAIRED", "RESEARCH_REPAIR", Map.of("count", failed.size()));
         parallel(failed, item -> {
             AgentState snapshot = stateStore.load(taskId);
-            ResearchResult result = llm.research(snapshot.getQuestion(), snapshot.getCurrentPlan(), item);
+            ReviewResult previousReview = snapshot.getReviewResults().get("research:" + item.id());
+            ResearchResult previous = snapshot.getResearchResults().get(item.id());
+            ResearchResult result = llm.repairResearch(snapshot.getQuestion(), snapshot.getCurrentPlan(), item, previous,
+                    previousReview == null ? List.of() : previousReview.issues());
+            // Repair 是覆写已有工件的路径，必须和首次研究执行相同的主题 ID 校验，
+            // 否则兼容模型的异常输出可能在此处把其他主题的结果覆盖进当前 Map 键。
+            validateResearchResult(result, item);
             stateStore.update(taskId, s -> s.getResearchResults().put(item.id(), result));
             writeArtifact(taskId, "research", item.id() + ".json", result);
         });
@@ -315,7 +322,7 @@ public class TaskWorkflowNodes {
         List<PlanItem> failed = new ArrayList<>();
         for (PlanItem item : start.getCurrentPlan().items()) {
             Answer answer = stateStore.load(taskId).getAnswers().get(item.id());
-            ReviewResult review = llm.reviewAnswer(item, answer);
+            ReviewResult review = normalizeReviewResult(llm.reviewAnswer(item, answer), item);
             stateStore.update(taskId, s -> s.getReviewResults().put("answer:" + item.id(), review));
             writeArtifact(taskId, "reviews", "answer-" + item.id() + ".json", review);
             if (!review.passed()) failed.add(item);
@@ -342,7 +349,12 @@ public class TaskWorkflowNodes {
         events.publish(taskId, "ANSWER_REPAIRED", "ANSWER_REPAIR", Map.of("count", failed.size()));
         parallel(failed, item -> {
             AgentState snapshot = stateStore.load(taskId);
-            Answer answer = llm.generateAnswer(snapshot.getCurrentPlan(), item, snapshot.getResearchResults().get(item.id()));
+            ReviewResult previousReview = snapshot.getReviewResults().get("answer:" + item.id());
+            Answer previous = snapshot.getAnswers().get(item.id());
+            Answer answer = llm.repairAnswer(snapshot.getCurrentPlan(), item, snapshot.getResearchResults().get(item.id()), previous,
+                    previousReview == null ? List.of() : previousReview.issues());
+            // 与首次写作保持同一边界：修复结果必须仍属于当前主题，不能跨主题污染输出文件。
+            require(answer != null && item.id().equals(answer.topicId()), "LLM_INVALID_OUTPUT", "修复后的答案主题标识不匹配");
             stateStore.update(taskId, s -> s.getAnswers().put(item.id(), answer));
             writeArtifact(taskId, "answers", item.id() + ".json", answer);
         });
@@ -440,6 +452,60 @@ public class TaskWorkflowNodes {
         require(plan != null && plan.version() == expectedVersion, "LLM_INVALID_OUTPUT", "纲要版本无效");
         require(plan.items() != null && !plan.items().isEmpty() && plan.items().size() <= properties.getLimits().getMaxPlanItems(), "LLM_INVALID_OUTPUT", "纲要主题数量无效");
         require(plan.items().stream().allMatch(item -> item.id() != null && !item.id().isBlank() && item.title() != null && !item.title().isBlank()), "LLM_INVALID_OUTPUT", "纲要存在缺少标识或标题的主题");
+    }
+
+    /**
+     * 校验研究结果能够安全进入审核与后续写作阶段。
+     *
+     * <p>仅校验 topicId 无法阻止空 details 或空问题列表进入状态文件；这类结果会让审核模型
+     * 反复给出笼统的失败意见，最终耗尽修复轮次。因此在首次研究和定向修复两个入口统一执行
+     * 最小结构校验，并在模型输出不合格时直接以稳定错误码终止。</p>
+     *
+     * @param result 模型返回的研究结果
+     * @param item 当前锁定主题
+     */
+    private void validateResearchResult(ResearchResult result, PlanItem item) {
+        require(result != null && item.id().equals(result.topicId()), "LLM_INVALID_OUTPUT", "研究结果主题标识不匹配");
+        require(!result.details().isEmpty(), "LLM_INVALID_OUTPUT", "研究结果缺少可审核的细节");
+        require(result.details().stream().allMatch(detail -> detail.id() != null && !detail.id().isBlank()
+                        && detail.title() != null && !detail.title().isBlank() && !detail.questions().isEmpty()
+                        && detail.questions().stream().allMatch(question -> question != null && !question.isBlank())),
+                "LLM_INVALID_OUTPUT", "研究结果存在缺少标识、标题或问题的细节");
+    }
+
+    /**
+     * 将审核器的原始判断规整为工作流可执行的通过语义。
+     *
+     * <p>模型常把“还可以进一步完善”的 MEDIUM/LOW 建议标为 {@code passed=false}。若直接把这类
+     * 建议送入回边，模型即使已满足 Plan 也会在每轮被要求继续扩写，最终触发最大修复次数。这里
+     * 只让 HIGH/CRITICAL/BLOCKER 级、且审核器明确要求失败的问题进入 Repair；其余建议仍会持久化，
+     * 但不会阻塞后续写作。空审核结果仍视为模型协议错误，不能悄悄放行。</p>
+     *
+     * @param review 模型返回的原始审核结果
+     * @param item 当前被审核的锁定主题
+     * @return 与工作流路由一致的审核结果
+     */
+    private ReviewResult normalizeReviewResult(ReviewResult review, PlanItem item) {
+        require(review != null, "LLM_INVALID_OUTPUT", "审核结果为空：" + item.id());
+        if (review.passed()) return review;
+        require(!review.issues().isEmpty(), "LLM_INVALID_OUTPUT", "审核未通过但缺少可修复问题：" + item.id());
+        boolean hasBlockingIssue = review.issues().stream().anyMatch(this::isBlockingIssue);
+        if (hasBlockingIssue) return review;
+        // 保留审核意见和评分，以便前端展示改进建议；只把路由含义改为“可继续”，避免状态与图分支不一致。
+        return new ReviewResult(true, review.score(), review.issues());
+    }
+
+    /**
+     * 判断一个审核问题是否足以阻断工作流。
+     *
+     * <p>兼容中英文大小写与常见的 BLOCKER 标记，避免不同 OpenAI-compatible 模型的大小写差异
+     * 改变工作流分支。MEDIUM/LOW/INFO 只作为质量建议，不应消耗有限的自动修复轮次。</p>
+     */
+    private boolean isBlockingIssue(ReviewResult.Issue issue) {
+        if (issue == null || issue.severity() == null) return false;
+        String severity = issue.severity().trim().toUpperCase(Locale.ROOT);
+        return "HIGH".equals(severity) || "CRITICAL".equals(severity) || "BLOCKER".equals(severity)
+                || "高".equals(severity) || "严重".equals(severity) || "阻断".equals(severity);
     }
 
     /**
