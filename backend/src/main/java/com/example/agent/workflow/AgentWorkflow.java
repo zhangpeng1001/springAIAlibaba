@@ -1,16 +1,16 @@
 package com.example.agent.workflow;
 
-import com.alibaba.cloud.ai.graph.CompiledGraph;
-import com.alibaba.cloud.ai.graph.CompileConfig;
-import com.alibaba.cloud.ai.graph.KeyStrategy;
-import com.alibaba.cloud.ai.graph.StateGraph;
+import com.alibaba.cloud.ai.graph.*;
 import com.alibaba.cloud.ai.graph.action.AsyncEdgeAction;
 import com.alibaba.cloud.ai.graph.action.AsyncNodeAction;
 import com.example.agent.service.TaskWorkflowNodes;
+
 import java.util.Map;
 import java.util.function.Consumer;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.context.annotation.AnnotationConfigApplicationContext;
 import org.springframework.stereotype.Component;
 
 /**
@@ -55,10 +55,12 @@ public class AgentWorkflow {
                     "researchPassed", KeyStrategy.REPLACE,
                     "answerPassed", KeyStrategy.REPLACE));
 
-            stateGraph.addNode("ROUTER", marker("ROUTER", ignored -> { }))
+            stateGraph.addNode("ROUTER", marker("ROUTER", ignored -> {
+                    }))
                     .addNode("TASK_ANALYZE", marker("TASK_ANALYZE", nodes::taskAnalyze))
                     .addNode("PLAN_DRAFT", marker("PLAN_DRAFT", nodes::planDraft))
-                    .addNode("WAITING_USER_PLAN", marker("WAITING_USER_PLAN", ignored -> { }))
+                    .addNode("WAITING_USER_PLAN", marker("WAITING_USER_PLAN", ignored -> {
+                    }))
                     .addNode("PLAN_REVISE", marker("PLAN_REVISE", nodes::planRevise))
                     .addNode("PLAN_LOCK", marker("PLAN_LOCK", nodes::planLock))
                     .addNode("RESEARCH", marker("RESEARCH", nodes::research))
@@ -105,7 +107,7 @@ public class AgentWorkflow {
     /**
      * 执行创建、修订或确认后的图分支。
      *
-     * @param taskId 已经创建并落盘的任务标识；不会在该方法中创建新状态文件
+     * @param taskId  已经创建并落盘的任务标识；不会在该方法中创建新状态文件
      * @param runMode INITIAL 进入分析/初稿，REVISE 处理待处理意见，AUTO 从锁定 Plan 进入自动阶段
      */
     public void run(String taskId, String runMode) {
@@ -120,7 +122,7 @@ public class AgentWorkflow {
      * <p>包装后节点统一从 Graph state 提取 taskId、调用业务节点，并写回 currentNode，
      * 使图执行轨迹与 state.json 中记录的阶段可以相互核对。</p>
      *
-     * @param name 当前图节点名称
+     * @param name   当前图节点名称
      * @param action 接收 taskId 的同步业务动作
      * @return 可注册到 StateGraph 的异步节点动作
      */
@@ -148,8 +150,8 @@ public class AgentWorkflow {
      * <p>审核详情仍由业务节点写入 reviews 目录和 AgentState；Graph 只保留 PASS/FAIL
      * 所需的最小信息，避免在图状态中复制大量结构化内容。</p>
      *
-     * @param name 当前审核节点名称
-     * @param action 返回是否通过的审核业务动作
+     * @param name      当前审核节点名称
+     * @param action    返回是否通过的审核业务动作
      * @param resultKey Graph state 中保存审核结果的键
      * @return 可注册到 StateGraph 的审核节点动作
      */
@@ -188,6 +190,33 @@ public class AgentWorkflow {
         return AsyncEdgeAction.edge_async(state -> state.value(key, Boolean.class).orElse(false) ? "PASS" : "FAIL");
     }
 
-    /** 将节点开始时间转换为毫秒，保证所有图级生命周期日志使用相同耗时单位。 */
-    private long elapsedMillis(long startedAt) { return java.time.Duration.ofNanos(System.nanoTime() - startedAt).toMillis(); }
+    /**
+     * 将节点开始时间转换为毫秒，保证所有图级生命周期日志使用相同耗时单位。
+     */
+    private long elapsedMillis(long startedAt) {
+        return java.time.Duration.ofNanos(System.nanoTime() - startedAt).toMillis();
+    }
+
+    /**
+     * 把当前工作流以流程图形式打印到控制台，便于直观对比 Mermaid 与 PlantUML 两种渲染风格。
+     *
+     * <p>该方法不依赖 Spring 容器，直接按构造器中静态定义的节点和边输出文本；
+     * 因为图的拓扑在编译期固定，运行时不会发生变更，所以无需实例化 Graph 即可准确还原结构。</p>
+     *
+     * <p>使用方式：将下方打印出的两段文本分别粘贴到
+     * <a href="https://mermaid.live">Mermaid Live</a> 和
+     * <a href="https://www.plantuml.com/plantuml/uml">PlantUML Online</a>，
+     * 渲染后挑选风格更清晰的一种作为后续文档配图。</p>
+     *
+     * @param args 未使用的命令行参数
+     */
+    public static void main(String[] args) {
+        AnnotationConfigApplicationContext ctx = new AnnotationConfigApplicationContext();
+
+        AgentWorkflow bean = ctx.getBean(AgentWorkflow.class);
+        // 导出 Mermaid
+        String mermaid = bean.graph.getGraph(GraphRepresentation.Type.MERMAID).content();
+        System.out.println(mermaid);
+        ctx.close();
+    }
 }

@@ -93,4 +93,4 @@ mvn -f backend/pom.xml test
 cd frontend; npm run build; npm test
 ```
 
-更多状态转换、恢复与安全边界见 [架构说明](docs/architecture.md)。
+更多状态转换、恢复与安全边界见 [架构说明](docs/architecture.md)；需要逐节点跟踪 `TaskStateStore`、`AgentState`、SSE 事件与故障现场时，见 [工作流流转与排障说明（flowExplain）](docs/flowExplain.md)。
