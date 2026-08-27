@@ -1,5 +1,6 @@
 package com.example.agent.llm;
 
+import com.example.agent.exception.TaskException;
 import com.example.agent.model.Answer;
 import com.example.agent.model.Plan;
 import com.example.agent.model.PlanItem;
@@ -8,6 +9,7 @@ import com.example.agent.model.ReviewResult;
 import com.example.agent.model.TaskAnalysis;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
+import java.time.Duration;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.openai.OpenAiChatModel;
 import org.springframework.ai.openai.OpenAiChatOptions;
@@ -16,6 +18,8 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.context.annotation.Profile;
 import org.springframework.core.io.ClassPathResource;
 import org.springframework.stereotype.Service;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * OpenAI-compatible 模型适配器。
@@ -27,6 +31,14 @@ import org.springframework.stereotype.Service;
 @Service
 @Profile("openai")
 public class OpenAiCompatibleLlmService implements LlmService {
+    /**
+     * 模型调用诊断日志。
+     *
+     * <p>只记录组件名、目标类型、耗时、根地址和异常栈，不记录 API Key、完整 Prompt 或用户问题，
+     * 在满足排障需要的同时避免把敏感内容写入日志文件。</p>
+     */
+    private static final Logger log = LoggerFactory.getLogger(OpenAiCompatibleLlmService.class);
+
     /**
      * Spring AI 统一聊天客户端。
      * 仅在 openai profile 且 API Key 存在时创建，避免默认离线运行也意外发起远程连接。
@@ -41,13 +53,18 @@ public class OpenAiCompatibleLlmService implements LlmService {
      * @param model 各角色共用的默认模型名，后续可按角色扩展为多模型路由
      */
     public OpenAiCompatibleLlmService(@Value("${spring.ai.openai.api-key:}") String apiKey,
-                                      @Value("${spring.ai.openai.base-url:https://api.openai.com/v1}") String baseUrl,
+                                      @Value("${spring.ai.openai.base-url:https://api.openai.com}") String baseUrl,
                                       @Value("${spring.ai.openai.chat.options.model:gpt-4o-mini}") String model) {
         if (apiKey.isBlank()) throw new IllegalStateException("openai profile 需要配置 OPENAI_API_KEY");
-        OpenAiApi api = OpenAiApi.builder().baseUrl(normalizeBaseUrl(baseUrl)).apiKey(apiKey).build();
+        String normalizedBaseUrl = normalizeBaseUrl(baseUrl);
+        OpenAiApi api = OpenAiApi.builder().baseUrl(normalizedBaseUrl).apiKey(apiKey).build();
         OpenAiChatModel chatModel = OpenAiChatModel.builder().openAiApi(api)
                 .defaultOptions(OpenAiChatOptions.builder().model(model).temperature(0.2).build()).build();
         this.client = ChatClient.create(chatModel);
+        // 当前 Spring AI 版本会基于该根地址追加 /v1/chat/completions，启动时明确打印最终约定，
+        // 可在未创建任务前立即发现环境变量把 /v1 重复配置的问题。
+        log.info("已初始化 OpenAI-compatible 模型客户端：baseUrl={}，请求路径由 Spring AI 追加为 /v1/chat/completions，model={}",
+                normalizedBaseUrl, model);
     }
 
     /** 使用任务分析 Prompt，得到结构化分类而不是让模型返回自由文本。 */
@@ -93,7 +110,19 @@ public class OpenAiCompatibleLlmService implements LlmService {
      * 再由工作流统一记录为 LLM_INVALID_OUTPUT 或任务失败，而不是把不可信文本写入状态文件。</p>
      */
     private <T> T call(String prompt, String user, Class<T> target) {
-        return client.prompt().system(readPrompt(prompt)).user(user).call().entity(target);
+        long startedAt = System.nanoTime();
+        log.info("开始调用模型：prompt={}，targetType={}，userContentLength={}", prompt, target.getSimpleName(), user.length());
+        try {
+            T result = client.prompt().system(readPrompt(prompt)).user(user).call().entity(target);
+            log.info("模型调用成功：prompt={}，targetType={}，durationMs={}", prompt, target.getSimpleName(), elapsedMillis(startedAt));
+            return result;
+        } catch (Exception ex) {
+            // 异常栈必须在服务端完整记录。前端只收到稳定错误码和可操作提示，避免远程响应、路径或
+            // 框架实现细节被直接暴露；运维可凭 taskId、节点日志和此异常栈定位根因。
+            log.error("模型调用失败：prompt={}，targetType={}，durationMs={}，exceptionType={}，message={}",
+                    prompt, target.getSimpleName(), elapsedMillis(startedAt), ex.getClass().getName(), ex.getMessage(), ex);
+            throw new TaskException("LLM_REQUEST_FAILED", "模型服务调用失败，请检查服务地址、模型名称和访问密钥；详细原因请查看后端日志", true);
+        }
     }
 
     /**
@@ -113,11 +142,27 @@ public class OpenAiCompatibleLlmService implements LlmService {
     }
 
     /**
-     * 将兼容服务根地址标准化到 OpenAI API 的 /v1 根路径。
-     * 支持用户配置 https://host、https://host/ 或 https://host/v1，避免重复或遗漏路径段。
+     * 将用户输入标准化为 Spring AI 所需的服务根地址（不含 {@code /v1}）。
+     *
+     * <p>当前版本 {@link OpenAiApi} 会自行把 {@code /v1/chat/completions} 追加到 baseUrl。
+     * 因此保留 {@code /v1} 会造成实际请求为 {@code /v1/v1/chat/completions}，进而被兼容服务以 404
+     * 拒绝。这里兼容 {@code https://host}、{@code https://host/}、{@code https://host/v1} 以及多次
+     * 误拼接的末尾 {@code /v1}，将配置错误在客户端构建阶段彻底消除。</p>
+     *
+     * @param baseUrl 环境变量或配置文件提供的服务地址
+     * @return 不以斜杠或 {@code /v1} 结尾的服务根地址
+     * @throws IllegalArgumentException 地址为空或仅包含 API 路径时抛出，避免在工作流中才发生不明 404
      */
-    private String normalizeBaseUrl(String baseUrl) {
-        String normalized = baseUrl.replaceAll("/+$", "");
-        return normalized.endsWith("/v1") ? normalized : normalized + "/v1";
+    static String normalizeBaseUrl(String baseUrl) {
+        String normalized = baseUrl == null ? "" : baseUrl.trim().replaceAll("/+$", "");
+        // (?i) 兼容 /V1；重复剥离可修复已经被手工拼成 /v1/v1 的历史环境变量。
+        normalized = normalized.replaceFirst("(?i)(/v1)+$", "");
+        if (normalized.isBlank() || !normalized.matches("https?://.+")) {
+            throw new IllegalArgumentException("OPENAI_BASE_URL 必须是以 http:// 或 https:// 开头的服务根地址");
+        }
+        return normalized;
     }
+
+    /** 将纳秒起点转换为毫秒，统一模型调用成功与失败日志中的耗时统计口径。 */
+    private long elapsedMillis(long startedAt) { return Duration.ofNanos(System.nanoTime() - startedAt).toMillis(); }
 }

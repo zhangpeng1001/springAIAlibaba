@@ -12,6 +12,8 @@ import java.nio.file.StandardCopyOption;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.locks.ReentrantLock;
 import java.util.function.Consumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -22,6 +24,12 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class TaskStateStore {
+    /**
+     * 文件状态读写日志。
+     * 仅记录 taskId、状态、节点与受控路径，不序列化完整 AgentState，避免研究内容和用户文本重复落入日志。
+     */
+    private static final Logger log = LoggerFactory.getLogger(TaskStateStore.class);
+
     /**
      * 所有任务目录的绝对规范化根路径，即 {@code {storage.root}/tasks}。
      * 后续路径均从该根路径派生，避免工作目录变化导致状态散落到不同位置。
@@ -46,6 +54,7 @@ public class TaskStateStore {
         this.tasksRoot = Path.of(properties.getStorage().getRoot()).toAbsolutePath().normalize().resolve("tasks");
         Files.createDirectories(tasksRoot);
         this.mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        log.info("任务状态仓库已初始化：tasksRoot={}", tasksRoot);
     }
 
     /**
@@ -65,7 +74,9 @@ public class TaskStateStore {
                 Files.createDirectories(dir.resolve("answers"));
                 Files.createDirectories(dir.resolve("reviews"));
                 writeAtomic(statePath(state.getTaskId()), state);
+                log.info("已创建任务目录和初始状态：taskId={}，status={}，directory={}", state.getTaskId(), state.getStatus(), dir);
             } catch (IOException ex) {
+                log.error("创建任务状态失败：taskId={}", state.getTaskId(), ex);
                 throw new IllegalStateException("创建任务状态失败", ex);
             }
         });
@@ -85,6 +96,7 @@ public class TaskStateStore {
         try {
             return mapper.readValue(statePath(taskId).toFile(), AgentState.class);
         } catch (IOException ex) {
+            log.error("读取任务状态失败：taskId={}，statePath={}", taskId, statePath(taskId), ex);
             throw new IllegalArgumentException("任务不存在或状态文件损坏: " + taskId, ex);
         } finally {
             lock.unlock();
@@ -105,11 +117,16 @@ public class TaskStateStore {
         final AgentState[] result = new AgentState[1];
         withLock(taskId, () -> {
             AgentState state = load(taskId);
+            String previousNode = state.getCurrentNode();
+            Object previousStatus = state.getStatus();
             mutator.accept(state);
             try {
                 writeAtomic(statePath(taskId), state);
                 result[0] = state;
+                log.info("任务状态已持久化：taskId={}，previousStatus={}，currentStatus={}，previousNode={}，currentNode={}",
+                        taskId, previousStatus, state.getStatus(), previousNode, state.getCurrentNode());
             } catch (IOException ex) {
+                log.error("持久化任务状态失败：taskId={}，statePath={}", taskId, statePath(taskId), ex);
                 throw new IllegalStateException("持久化任务状态失败: " + ex.getMessage(), ex);
             }
         });
@@ -127,6 +144,7 @@ public class TaskStateStore {
                     .filter(p -> Files.exists(p.resolve("state.json")))
                     .map(p -> load(p.getFileName().toString())).toList();
         } catch (IOException ex) {
+            log.error("扫描任务目录失败：tasksRoot={}", tasksRoot, ex);
             throw new IllegalStateException("扫描任务目录失败", ex);
         }
     }
@@ -163,6 +181,8 @@ public class TaskStateStore {
         try {
             Files.move(tmp, target, StandardCopyOption.ATOMIC_MOVE, StandardCopyOption.REPLACE_EXISTING);
         } catch (AtomicMoveNotSupportedException ex) {
+            // 某些网络盘或文件系统不支持原子移动。记录降级便于运维判断恢复风险，但继续使用安全替换移动。
+            log.warn("文件系统不支持原子移动，已降级为替换移动：target={}", target);
             Files.move(tmp, target, StandardCopyOption.REPLACE_EXISTING);
         }
     }

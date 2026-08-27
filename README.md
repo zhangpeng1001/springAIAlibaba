@@ -38,12 +38,17 @@ npm run dev
 ```powershell
 $env:SPRING_PROFILES_ACTIVE = "openai"
 $env:OPENAI_API_KEY = "你的密钥"
-$env:OPENAI_BASE_URL = "https://你的兼容端点/v1"
+# 请填写服务根地址，不要添加 /v1；当前 Spring AI 客户端会自动追加 /v1/chat/completions。
+$env:OPENAI_BASE_URL = "https://你的兼容端点"
 $env:OPENAI_MODEL = "你的模型名"
 mvn -f backend/pom.xml spring-boot:run
 ```
 
-如使用官方 OpenAI，`OPENAI_BASE_URL` 可省略。密钥只从环境变量读取，绝不写入仓库。
+如使用官方 OpenAI，`OPENAI_BASE_URL` 可省略。即使误填了末尾 `/v1`，后端也会在启动时自动清理并记录规范化后的根地址。密钥只从环境变量读取，绝不写入仓库。
+
+## 排障日志
+
+应用会同时输出控制台日志和 `./logs/knowledge-agent.log`（可用 `LOG_FILE` 环境变量覆盖）。日志包含 HTTP 请求 ID、任务 ID、工作流节点、事件、模型调用耗时与完整异常栈；不会记录 API Key、完整 Prompt 或用户问题正文。模型调用失败时，前端会收到 `LLM_REQUEST_FAILED` 和安全提示，详细的远程错误响应请在后端日志中查看。
 
 ## 核心 API
 

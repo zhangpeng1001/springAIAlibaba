@@ -8,6 +8,8 @@ import java.util.concurrent.ConcurrentHashMap;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Service;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * SSE 连接管理器。
@@ -16,6 +18,12 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
  */
 @Service
 public class TaskEventService {
+    /**
+     * 事件与 SSE 传输诊断日志。
+     * 事件正文可能带有 Plan 或用户意见，因此只记录 payload 字段名而不输出完整业务数据。
+     */
+    private static final Logger log = LoggerFactory.getLogger(TaskEventService.class);
+
     /** 事件 JSONL 持久化与按 eventId 回放服务。 */
     private final EventLogStore eventLogStore;
     /**
@@ -40,12 +48,17 @@ public class TaskEventService {
      */
     public WorkflowEvent publish(String taskId, String type, String stage, Map<String, Object> payload) {
         WorkflowEvent event = eventLogStore.append(taskId, type, stage, payload);
+        int subscriberCount = emitters.getOrDefault(taskId, new ConcurrentHashMap<>()).size();
+        log.info("任务事件已持久化：taskId={}，eventId={}，type={}，stage={}，payloadKeys={}，subscriberCount={}", taskId,
+                event.eventId(), type, stage, payload.keySet(), subscriberCount);
         emitters.getOrDefault(taskId, new ConcurrentHashMap<>()).forEach((id, emitter) -> {
             try {
                 emitter.send(SseEmitter.event().id(String.valueOf(event.eventId())).name(event.type())
                         .data(event, MediaType.APPLICATION_JSON));
             } catch (Exception ex) {
                 // 单个浏览器连接失败不能影响工作流或其他观察者；清理该 emitter 即可。
+                log.warn("SSE 实时事件发送失败，已移除连接：taskId={}，connectionId={}，eventId={}，exceptionType={}，message={}",
+                        taskId, id, event.eventId(), ex.getClass().getName(), ex.getMessage());
                 emitter.complete();
                 emitters.getOrDefault(taskId, new ConcurrentHashMap<>()).remove(id);
             }
@@ -71,11 +84,16 @@ public class TaskEventService {
         emitter.onTimeout(() -> remove(snapshot.getTaskId(), connectionId));
         try {
             emitter.send(SseEmitter.event().name("TASK_SNAPSHOT").data(snapshot, MediaType.APPLICATION_JSON));
-            for (WorkflowEvent event : eventLogStore.after(snapshot.getTaskId(), afterId)) {
+            java.util.List<WorkflowEvent> history = eventLogStore.after(snapshot.getTaskId(), afterId);
+            for (WorkflowEvent event : history) {
                 emitter.send(SseEmitter.event().id(String.valueOf(event.eventId())).name(event.type())
                         .data(event, MediaType.APPLICATION_JSON));
             }
+            log.info("SSE 订阅已建立并完成历史回放：taskId={}，connectionId={}，status={}，afterEventId={}，replayedEventCount={}",
+                    snapshot.getTaskId(), connectionId, snapshot.getStatus(), afterId, history.size());
         } catch (Exception ex) {
+            log.warn("SSE 建立或历史回放失败：taskId={}，connectionId={}，afterEventId={}，exceptionType={}，message={}",
+                    snapshot.getTaskId(), connectionId, afterId, ex.getClass().getName(), ex.getMessage(), ex);
             remove(snapshot.getTaskId(), connectionId);
             emitter.completeWithError(ex);
         }
@@ -85,5 +103,7 @@ public class TaskEventService {
     /** 在连接完成、超时或发送失败时移除内存订阅，防止 emitter 泄漏。 */
     private void remove(String taskId, String connectionId) {
         emitters.getOrDefault(taskId, new ConcurrentHashMap<>()).remove(connectionId);
+        log.info("SSE 连接已移除：taskId={}，connectionId={}，remainingSubscriberCount={}", taskId, connectionId,
+                emitters.getOrDefault(taskId, new ConcurrentHashMap<>()).size());
     }
 }

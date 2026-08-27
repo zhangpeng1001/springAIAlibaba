@@ -9,6 +9,8 @@ import java.nio.file.StandardOpenOption;
 import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicLong;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -19,6 +21,9 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class EventLogStore {
+    /** 事件 JSONL 读写失败必须记录路径和完整堆栈，避免审计链路静默中断。 */
+    private static final Logger log = LoggerFactory.getLogger(EventLogStore.class);
+
     /** 用于定位任务目录和 events.jsonl 文件的状态仓库。 */
     private final TaskStateStore stateStore;
     /** JSONL 单行事件序列化器，支持 Instant 时间字段。 */
@@ -54,6 +59,7 @@ public class EventLogStore {
                     StandardOpenOption.CREATE, StandardOpenOption.WRITE, StandardOpenOption.APPEND);
             return event;
         } catch (IOException ex) {
+            log.error("写入任务事件日志失败：taskId={}，type={}，stage={}", taskId, type, stage, ex);
             throw new IllegalStateException("写入事件日志失败", ex);
         }
     }
@@ -75,7 +81,10 @@ public class EventLogStore {
                 try { return mapper.readValue(line, WorkflowEvent.class); }
                 catch (IOException ex) { throw new IllegalStateException("事件日志损坏", ex); }
             }).filter(e -> e.eventId() > afterId).toList();
-        } catch (IOException ex) { throw new IllegalStateException("读取事件日志失败", ex); }
+        } catch (IOException ex) {
+            log.error("读取任务事件日志失败：taskId={}，afterEventId={}", taskId, afterId, ex);
+            throw new IllegalStateException("读取事件日志失败", ex);
+        }
     }
 
     /**

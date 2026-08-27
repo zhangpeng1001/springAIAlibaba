@@ -12,6 +12,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.UUID;
 import java.util.concurrent.ExecutorService;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Service;
 
 /**
@@ -20,6 +22,14 @@ import org.springframework.stereotype.Service;
  */
 @Service
 public class TaskService {
+    /**
+     * 任务异步调度日志。
+     *
+     * <p>异步线程不继承 HTTP 请求 MDC，因此此处始终显式打印 taskId、运行模式和当前节点，
+     * 确保从浏览器受理到后台 Graph 执行、失败落盘的整条链路均可独立检索。</p>
+     */
+    private static final Logger log = LoggerFactory.getLogger(TaskService.class);
+
     /**
      * 唯一业务状态仓库。
      * 所有 API 状态校验都必须基于刚从磁盘读取的状态，不能依赖 Controller 或前端缓存。
@@ -63,6 +73,7 @@ public class TaskService {
         String taskId = createTaskId();
         AgentState state = AgentState.created(taskId, question.trim());
         stateStore.create(state);
+        log.info("已创建任务状态：taskId={}，questionLength={}，status={}", taskId, state.getQuestion().length(), state.getStatus());
         events.publish(taskId, "TASK_CREATED", "START", Map.of("question", state.getQuestion()));
         submit(taskId, "INITIAL");
         return state;
@@ -98,6 +109,8 @@ public class TaskService {
             s.setStatus(TaskStatus.PLAN_REVISING);
         });
         events.publish(taskId, "PLAN_REVISION_RECEIVED", "PLAN_REVISE", Map.of("message", message.trim(), "planVersion", state.getPlanVersion()));
+        log.info("已保存纲要修改意见并准备调度：taskId={}，planVersion={}，messageLength={}", taskId,
+                state.getPlanVersion(), message.trim().length());
         submit(taskId, "REVISE");
     }
 
@@ -119,6 +132,7 @@ public class TaskService {
             s.setPlanConfirmed(true);
         });
         events.publish(taskId, "PLAN_CONFIRMED", "PLAN_CONFIRM", Map.of("planVersion", state.getPlanVersion()));
+        log.info("已记录纲要确认并准备进入自动流程：taskId={}，planVersion={}", taskId, planVersion);
         submit(taskId, "AUTO");
     }
 
@@ -141,6 +155,7 @@ public class TaskService {
             s.setCurrentNode("CANCELLED");
         });
         events.publish(taskId, "WORKFLOW_CANCELLED", "CANCELLED", Map.of());
+        log.info("已将任务标记为取消：taskId={}，previousOrCurrentNode={}", taskId, state.getCurrentNode());
         return state;
     }
 
@@ -151,12 +166,19 @@ public class TaskService {
      * 已确认或已锁定任务从 AUTO 入口恢复。各节点会跳过已经落盘的主题工件。</p>
      */
     public void recoverIncompleteTasks() {
-        for (AgentState state : stateStore.list()) {
+        List<AgentState> candidates = stateStore.list();
+        log.info("开始扫描待恢复任务：candidateCount={}", candidates.size());
+        for (AgentState state : candidates) {
             if (state.getStatus() == TaskStatus.WAITING_USER_PLAN || state.getStatus() == TaskStatus.SUCCESS
-                    || state.getStatus() == TaskStatus.FAILED || state.getStatus() == TaskStatus.CANCELLED) continue;
+                    || state.getStatus() == TaskStatus.FAILED || state.getStatus() == TaskStatus.CANCELLED) {
+                log.info("恢复扫描跳过终态或人工等待任务：taskId={}，status={}", state.getTaskId(), state.getStatus());
+                continue;
+            }
             String mode = state.getStatus() == TaskStatus.PLAN_REVISING ? "REVISE"
                     : state.isPlanConfirmed() || state.isPlanLocked() ? "AUTO" : "INITIAL";
             events.publish(state.getTaskId(), "TASK_RECOVERY_STARTED", "RECOVERY", Map.of("mode", mode));
+            log.info("已识别可恢复任务：taskId={}，status={}，currentNode={}，resumeMode={}", state.getTaskId(),
+                    state.getStatus(), state.getCurrentNode(), mode);
             submit(state.getTaskId(), mode);
         }
     }
@@ -168,10 +190,19 @@ public class TaskService {
      * @param mode Graph 入口模式
      */
     private void submit(String taskId, String mode) {
+        log.info("已提交后台工作流：taskId={}，mode={}", taskId, mode);
         executor.submit(() -> {
+            long startedAt = System.nanoTime();
             try {
+                log.info("后台工作流开始执行：taskId={}，mode={}", taskId, mode);
                 workflow.run(taskId, mode);
+                AgentState completed = stateStore.load(taskId);
+                log.info("后台工作流执行结束：taskId={}，mode={}，status={}，currentNode={}，durationMs={}", taskId,
+                        mode, completed.getStatus(), completed.getCurrentNode(), elapsedMillis(startedAt));
             } catch (Exception ex) {
+                // 失败前先打出完整异常栈；fail 内的状态写入若二次失败，仍可依赖这一条日志定位原始问题。
+                log.error("后台工作流执行异常：taskId={}，mode={}，durationMs={}，exceptionType={}，message={}", taskId,
+                        mode, elapsedMillis(startedAt), ex.getClass().getName(), ex.getMessage(), ex);
                 fail(taskId, ex);
             }
         });
@@ -183,25 +214,43 @@ public class TaskService {
      */
     private void fail(String taskId, Exception ex) {
         AgentState latest;
-        try { latest = stateStore.load(taskId); } catch (Exception ignored) { return; }
-        if (latest.getStatus() == TaskStatus.CANCELLED || latest.isCancelRequested()) return;
+        try {
+            latest = stateStore.load(taskId);
+        } catch (Exception loadException) {
+            log.error("工作流异常后无法读取任务状态，无法固化失败结果：taskId={}", taskId, loadException);
+            return;
+        }
+        if (latest.getStatus() == TaskStatus.CANCELLED || latest.isCancelRequested()) {
+            log.info("任务已取消，忽略随后返回的工作流异常：taskId={}，exceptionType={}", taskId, ex.getClass().getName());
+            return;
+        }
         String code = ex instanceof TaskException taskException ? taskException.getCode() : "UNKNOWN_ERROR";
         // 保留框架异常的摘要，便于本地状态文件和前端错误面板定位 Graph/IO 故障；
         // 真实模型响应正文不在这里写入，避免把潜在敏感提示词落盘。
         String message = ex instanceof TaskException ? ex.getMessage()
                 : "工作流执行失败" + (ex.getMessage() == null ? "" : ": " + ex.getMessage());
-        AgentState failed = stateStore.update(taskId, s -> {
-            s.setStatus(TaskStatus.FAILED);
-            s.setErrorCode(code);
-            s.setErrorMessage(message);
-        });
-        events.publish(taskId, "TASK_FAILED", failed.getCurrentNode(), Map.of("errorCode", code, "message", message));
+        try {
+            AgentState failed = stateStore.update(taskId, s -> {
+                s.setStatus(TaskStatus.FAILED);
+                s.setErrorCode(code);
+                s.setErrorMessage(message);
+            });
+            events.publish(taskId, "TASK_FAILED", failed.getCurrentNode(), Map.of("errorCode", code, "message", message));
+            log.error("任务已固化为失败状态：taskId={}，stage={}，errorCode={}，retryable={}，message={}", taskId,
+                    failed.getCurrentNode(), code, ex instanceof TaskException taskException && taskException.isRetryable(), message);
+        } catch (Exception persistException) {
+            log.error("工作流异常后固化失败状态或发布失败事件时再次失败：taskId={}，originalErrorCode={}", taskId, code,
+                    persistException);
+        }
     }
 
     /** 将底层状态文件不存在/损坏异常转为统一的 TASK_NOT_FOUND API 语义。 */
     private AgentState load(String taskId) {
         try { return stateStore.load(taskId); }
-        catch (IllegalArgumentException ex) { throw new TaskException("TASK_NOT_FOUND", "任务不存在: " + taskId); }
+        catch (IllegalArgumentException ex) {
+            log.warn("读取任务失败：taskId={}，message={}", taskId, ex.getMessage());
+            throw new TaskException("TASK_NOT_FOUND", "任务不存在: " + taskId);
+        }
     }
 
     /**
@@ -218,4 +267,7 @@ public class TaskService {
      * 条件失败时必须携带稳定错误码，前端据此展示正确操作提示，而不是解析异常文本。
      */
     private void require(boolean condition, String code, String message) { if (!condition) throw new TaskException(code, message); }
+
+    /** 将工作流或节点开始时间转换为毫秒，保持后台异步日志的耗时口径统一。 */
+    private long elapsedMillis(long startedAt) { return java.time.Duration.ofNanos(System.nanoTime() - startedAt).toMillis(); }
 }

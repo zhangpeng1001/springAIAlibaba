@@ -9,6 +9,8 @@ import com.alibaba.cloud.ai.graph.action.AsyncNodeAction;
 import com.example.agent.service.TaskWorkflowNodes;
 import java.util.Map;
 import java.util.function.Consumer;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
 
 /**
@@ -19,6 +21,14 @@ import org.springframework.stereotype.Component;
  */
 @Component
 public class AgentWorkflow {
+    /**
+     * 图级别运行日志。
+     *
+     * <p>全部节点都会在本类统一包装，因此新增或调整工作流节点时也会自然获得开始、完成、耗时和
+     * 完整异常栈日志；无需依赖开发者在每个节点中重复编写容易遗漏的诊断代码。</p>
+     */
+    private static final Logger log = LoggerFactory.getLogger(AgentWorkflow.class);
+
     /**
      * 已编译的流程图。
      *
@@ -99,7 +109,9 @@ public class AgentWorkflow {
      * @param runMode INITIAL 进入分析/初稿，REVISE 处理待处理意见，AUTO 从锁定 Plan 进入自动阶段
      */
     public void run(String taskId, String runMode) {
+        log.info("开始调用 StateGraph：taskId={}，runMode={}", taskId, runMode);
         graph.invoke(Map.of("taskId", taskId, "runMode", runMode));
+        log.info("StateGraph 调用返回：taskId={}，runMode={}", taskId, runMode);
     }
 
     /**
@@ -115,8 +127,18 @@ public class AgentWorkflow {
     private AsyncNodeAction marker(String name, Consumer<String> action) {
         return AsyncNodeAction.node_async(state -> {
             String taskId = state.value("taskId", String.class).orElseThrow(() -> new IllegalStateException("Graph 缺少 taskId"));
-            action.accept(taskId);
-            return Map.of("currentNode", name);
+            long startedAt = System.nanoTime();
+            try {
+                log.info("工作流节点开始：taskId={}，node={}", taskId, name);
+                action.accept(taskId);
+                log.info("工作流节点完成：taskId={}，node={}，durationMs={}", taskId, name, elapsedMillis(startedAt));
+                return Map.of("currentNode", name);
+            } catch (RuntimeException ex) {
+                // 节点名称是定位模型调用、文件写入或状态转换失败的关键业务上下文，必须随异常栈记录。
+                log.error("工作流节点失败：taskId={}，node={}，durationMs={}，exceptionType={}，message={}", taskId, name,
+                        elapsedMillis(startedAt), ex.getClass().getName(), ex.getMessage(), ex);
+                throw ex;
+            }
         });
     }
 
@@ -134,7 +156,18 @@ public class AgentWorkflow {
     private AsyncNodeAction reviewNode(String name, java.util.function.Function<String, Boolean> action, String resultKey) {
         return AsyncNodeAction.node_async(state -> {
             String taskId = state.value("taskId", String.class).orElseThrow(() -> new IllegalStateException("Graph 缺少 taskId"));
-            return Map.of("currentNode", name, resultKey, action.apply(taskId));
+            long startedAt = System.nanoTime();
+            try {
+                log.info("工作流审核节点开始：taskId={}，node={}，resultKey={}", taskId, name, resultKey);
+                boolean passed = action.apply(taskId);
+                log.info("工作流审核节点完成：taskId={}，node={}，passed={}，durationMs={}", taskId, name, passed,
+                        elapsedMillis(startedAt));
+                return Map.of("currentNode", name, resultKey, passed);
+            } catch (RuntimeException ex) {
+                log.error("工作流审核节点失败：taskId={}，node={}，durationMs={}，exceptionType={}，message={}", taskId, name,
+                        elapsedMillis(startedAt), ex.getClass().getName(), ex.getMessage(), ex);
+                throw ex;
+            }
         });
     }
 
@@ -154,4 +187,7 @@ public class AgentWorkflow {
     private AsyncEdgeAction booleanRoute(String key) {
         return AsyncEdgeAction.edge_async(state -> state.value(key, Boolean.class).orElse(false) ? "PASS" : "FAIL");
     }
+
+    /** 将节点开始时间转换为毫秒，保证所有图级生命周期日志使用相同耗时单位。 */
+    private long elapsedMillis(long startedAt) { return java.time.Duration.ofNanos(System.nanoTime() - startedAt).toMillis(); }
 }

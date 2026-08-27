@@ -23,6 +23,8 @@ import org.springframework.web.bind.annotation.RequestMapping;
 import org.springframework.web.bind.annotation.RequestParam;
 import org.springframework.web.bind.annotation.RestController;
 import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 
 /**
  * 任务、Plan、人机对话与 SSE 的 REST 接口。
@@ -33,6 +35,14 @@ import org.springframework.web.servlet.mvc.method.annotation.SseEmitter;
 @RestController
 @RequestMapping("/api/tasks")
 public class TaskController {
+    /**
+     * HTTP 入口日志。
+     *
+     * <p>请求正文可能包含用户隐私，因此仅记录动作、taskId、版本和文本长度；具体的后台执行轨迹
+     * 由 TaskService、AgentWorkflow 与 TaskEventService 继续记录。</p>
+     */
+    private static final Logger log = LoggerFactory.getLogger(TaskController.class);
+
     /** 任务生命周期门面，集中执行状态校验和异步调度。 */
     private final TaskService taskService;
     /** SSE 连接及历史回放服务。 */
@@ -50,20 +60,38 @@ public class TaskController {
     @PostMapping
     public ResponseEntity<AcceptedTaskResponse> create(@Valid @RequestBody CreateTaskRequest request) {
         AgentState state = taskService.create(request.question());
+        log.info("已受理创建任务请求：taskId={}，questionLength={}，initialStatus={}", state.getTaskId(),
+                request.question().length(), state.getStatus());
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(new AcceptedTaskResponse(state.getTaskId(), state.getStatus().name()));
     }
 
     /** 历史列表仅返回 Task 摘要，避免首页下载研究和答案全文。 */
-    @GetMapping public List<Task> list() { return taskService.list().stream().map(Task::from).toList(); }
+    @GetMapping public List<Task> list() {
+        List<Task> tasks = taskService.list().stream().map(Task::from).toList();
+        log.info("已查询任务列表：count={}", tasks.size());
+        return tasks;
+    }
 
     /** @return 当前 state.json 的完整任务快照，供任务详情页恢复 UI。 */
-    @GetMapping("/{taskId}") public AgentState get(@PathVariable String taskId) { return taskService.get(taskId); }
+    @GetMapping("/{taskId}") public AgentState get(@PathVariable String taskId) {
+        AgentState state = taskService.get(taskId);
+        log.info("已查询任务详情：taskId={}，status={}，currentNode={}", taskId, state.getStatus(), state.getCurrentNode());
+        return state;
+    }
 
     /** @return 当前可见或已锁定的 Plan；不存在时返回 null 代表仍在生成初稿。 */
-    @GetMapping("/{taskId}/plan") public Plan plan(@PathVariable String taskId) { return taskService.get(taskId).getCurrentPlan(); }
+    @GetMapping("/{taskId}/plan") public Plan plan(@PathVariable String taskId) {
+        Plan plan = taskService.get(taskId).getCurrentPlan();
+        log.info("已查询当前纲要：taskId={}，planVersion={}，exists={}", taskId, plan == null ? null : plan.version(), plan != null);
+        return plan;
+    }
 
     /** @return 从 V1 到当前版本的不可变 Plan 审计列表。 */
-    @GetMapping("/{taskId}/plan/versions") public List<PlanVersion> versions(@PathVariable String taskId) { return taskService.get(taskId).getPlanVersions(); }
+    @GetMapping("/{taskId}/plan/versions") public List<PlanVersion> versions(@PathVariable String taskId) {
+        List<PlanVersion> versions = taskService.get(taskId).getPlanVersions();
+        log.info("已查询纲要历史：taskId={}，versionCount={}", taskId, versions.size());
+        return versions;
+    }
 
     /**
      * 接收用户修改意见并异步触发 Plan 修订。
@@ -72,6 +100,7 @@ public class TaskController {
     @PostMapping("/{taskId}/messages")
     public ResponseEntity<AcceptedTaskResponse> message(@PathVariable String taskId, @Valid @RequestBody TaskMessageRequest request) {
         taskService.revisePlan(taskId, request.message());
+        log.info("已受理纲要修改：taskId={}，messageLength={}", taskId, request.message().length());
         return ResponseEntity.accepted().body(new AcceptedTaskResponse(taskId, "PLAN_REVISING"));
     }
 
@@ -82,6 +111,7 @@ public class TaskController {
     @PostMapping("/{taskId}/plan/confirm")
     public ResponseEntity<AcceptedTaskResponse> confirm(@PathVariable String taskId, @Valid @RequestBody ConfirmPlanRequest request) {
         taskService.confirmPlan(taskId, request.planVersion());
+        log.info("已受理纲要确认：taskId={}，planVersion={}", taskId, request.planVersion());
         return ResponseEntity.accepted().body(new AcceptedTaskResponse(taskId, "PLAN_CONFIRMED"));
     }
 
@@ -91,6 +121,7 @@ public class TaskController {
     @PostMapping("/{taskId}/cancel")
     public ResponseEntity<AcceptedTaskResponse> cancel(@PathVariable String taskId) {
         AgentState state = taskService.cancel(taskId);
+        log.info("已受理取消任务：taskId={}，status={}", taskId, state.getStatus());
         return ResponseEntity.accepted().body(new AcceptedTaskResponse(taskId, state.getStatus().name()));
     }
 
@@ -104,6 +135,7 @@ public class TaskController {
                              @RequestHeader(value = "Last-Event-ID", required = false) String lastEventId,
                              @RequestParam(value = "afterId", required = false) Long afterId) {
         long cursor = afterId != null ? afterId : parse(lastEventId);
+        log.info("正在建立 SSE 订阅：taskId={}，afterEventId={}", taskId, cursor);
         return events.connect(taskService.get(taskId), cursor);
     }
 
@@ -113,6 +145,9 @@ public class TaskController {
      */
     private long parse(String source) {
         try { return source == null || source.isBlank() ? 0L : Long.parseLong(source); }
-        catch (NumberFormatException ex) { return 0L; }
+        catch (NumberFormatException ex) {
+            log.warn("SSE 事件游标格式非法，已从头回放：source={}", source);
+            return 0L;
+        }
     }
 }
