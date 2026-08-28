@@ -146,9 +146,17 @@ public class OpenAiCompatibleLlmService implements LlmService {
         return call("plan-conversation/system.txt", "用户问题：\n" + question + "\n\n当前 Plan：\n" + json(current) + "\n\n用户意见：\n" + feedback, Plan.class);
     }
 
-    /** 将锁定 Plan 与当前主题一起传入，要求模型只研究该主题。 */
+    /**
+     * 仅使用用户目标和当前锁定主题生成研究结果。
+     *
+     * <p>完整 Plan 已由 Java 工作流保存并锁定，研究 Agent 只需当前 PlanItem 即可确定范围；保留
+     * {@code plan} 参数是为了遵守 {@link LlmService} 的统一接口，不能将其再次拼入请求上下文。</p>
+     */
     @Override public ResearchResult research(String question, Plan plan, PlanItem item) {
-        return call("researcher/system.txt", "原始问题：\n" + question + "\n\n锁定 Plan：\n" + json(plan) + "\n\n当前主题：\n" + json(item), ResearchResult.class);
+        // ResearchResult 的归属与范围完全由当前 PlanItem 决定；整份 Plan 是编排层状态，重复附带会把
+        // 其他主题（例如安全、SQL 等）无关内容送到每一次请求中，既增加 token 消耗，也可能被上游策略
+        // 误判为不相关的敏感上下文。因此研究阶段只发送用户目标和当前主题的最小必要上下文。
+        return call("researcher/system.txt", researchUserContent(question, item), ResearchResult.class);
     }
 
     /**
@@ -160,19 +168,21 @@ public class OpenAiCompatibleLlmService implements LlmService {
      */
     @Override public ResearchResult repairResearch(String question, Plan plan, PlanItem item, ResearchResult previous,
                                                    List<ReviewResult.Issue> issues) {
-        return call("researcher/repair.txt", "原始问题：\n" + question + "\n\n锁定 Plan：\n" + json(plan)
-                + "\n\n当前主题：\n" + json(item) + "\n\n上一版研究结果：\n" + json(previous)
+        // 与首次研究保持相同的最小上下文边界，避免修复单一主题时再次携带整份锁定 Plan。
+        return call("researcher/repair.txt", researchUserContent(question, item) + "\n\n上一版研究结果：\n" + json(previous)
                 + "\n\n必须解决的审核问题：\n" + json(issues), ResearchResult.class);
     }
 
     /** 研究审核结果仅用于覆盖、偏题等质量判断，不能修改 Plan 本身。 */
     @Override public ReviewResult reviewResearch(Plan plan, PlanItem item, ResearchResult result) {
-        return call("research-reviewer/system.txt", "Plan：\n" + json(plan) + "\n\n当前主题：\n" + json(item) + "\n\n研究结果：\n" + json(result), ReviewResult.class);
+        // 审核只需比较当前主题和该主题的研究结果，整份 Plan 不会影响当前主题是否达标。
+        return call("research-reviewer/system.txt", "当前主题：\n" + json(item) + "\n\n研究结果：\n" + json(result), ReviewResult.class);
     }
 
     /** 按审核通过的研究结果写作，禁止跳过研究直接凭原问题生成答案。 */
     @Override public Answer generateAnswer(Plan plan, PlanItem item, ResearchResult research) {
-        return call("answer/system.txt", "锁定 Plan：\n" + json(plan) + "\n\n当前主题：\n" + json(item) + "\n\n研究结果：\n" + json(research), Answer.class);
+        // 答案只能消费已通过审核的当前主题研究结果；传入全量 Plan 不会提高答案质量，反而扩大上游请求上下文。
+        return call("answer/system.txt", "当前主题：\n" + json(item) + "\n\n研究结果：\n" + json(research), Answer.class);
     }
 
     /**
@@ -181,7 +191,8 @@ public class OpenAiCompatibleLlmService implements LlmService {
      */
     @Override public Answer repairAnswer(Plan plan, PlanItem item, ResearchResult research, Answer previous,
                                          List<ReviewResult.Issue> issues) {
-        return call("answer/repair.txt", "锁定 Plan：\n" + json(plan) + "\n\n当前主题：\n" + json(item)
+        // 修复范围由当前主题与审核意见精确约束，无需把其他主题的 Plan 项一并提交给模型。
+        return call("answer/repair.txt", "当前主题：\n" + json(item)
                 + "\n\n已审核研究结果：\n" + json(research) + "\n\n上一版答案：\n" + json(previous)
                 + "\n\n必须解决的审核问题：\n" + json(issues), Answer.class);
     }
@@ -218,8 +229,58 @@ public class OpenAiCompatibleLlmService implements LlmService {
             // 框架实现细节被直接暴露；运维可凭 taskId、节点日志和此异常栈定位根因。
             log.error("模型调用失败：prompt={}，targetType={}，durationMs={}，exceptionType={}，message={}",
                     prompt, target.getSimpleName(), elapsedMillis(startedAt), ex.getClass().getName(), ex.getMessage(), ex);
-            throw new TaskException("LLM_REQUEST_FAILED", "模型服务调用失败，请检查服务地址、模型名称和访问密钥；详细原因请查看后端日志", true);
+            throw classifyRequestFailure(ex);
         }
+    }
+
+    /**
+     * 为模型调用异常提供可操作的业务错误码。
+     *
+     * <p>上游返回 {@code invalid_prompt} 时，请求已经到达服务端且认证通过，因此继续提示检查地址、模型
+     * 或密钥会误导使用者。该类拒绝通常需要收敛或调整请求上下文，不能通过原样重试消除；其他异常仍保留
+     * 原有的可重试语义，以覆盖网络瞬断和兼容服务短暂不可用等情形。</p>
+     *
+     * @param error Spring AI 或 HTTP 客户端抛出的异常
+     * @return 面向任务工作流的稳定错误码与重试语义
+     */
+    private TaskException classifyRequestFailure(Exception error) {
+        if (isPromptRejected(error)) {
+            return new TaskException("LLM_PROMPT_REJECTED", "模型服务因内容策略拒绝了本次请求；请精简或调整任务描述后重新创建任务", false);
+        }
+        return new TaskException("LLM_REQUEST_FAILED", "模型服务调用失败，请检查服务地址、模型名称和访问密钥；详细原因请查看后端日志", true);
+    }
+
+    /**
+     * 判断异常链是否为兼容服务返回的 Prompt 策略拒绝。
+     *
+     * <p>不同 OpenAI-compatible 服务会把同一类错误包装为不同的异常类型，因此不能依赖具体 SDK 类。
+     * 只匹配响应体中稳定的协议标识和官方兼容文案，避免把普通 400 参数错误误分类为内容策略问题。</p>
+     *
+     * @param error 待检查的异常及其 cause 链
+     * @return 检测到 {@code invalid_prompt} 或明确的 prompt 标记文案时返回 {@code true}
+     */
+    static boolean isPromptRejected(Throwable error) {
+        for (Throwable current = error; current != null; current = current.getCause()) {
+            String message = current.getMessage();
+            if (message == null) continue;
+            String normalized = message.toLowerCase(java.util.Locale.ROOT);
+            if (normalized.contains("invalid_prompt") || normalized.contains("prompt was flagged")) return true;
+        }
+        return false;
+    }
+
+    /**
+     * 构造单主题研究请求的最小上下文。
+     *
+     * <p>Plan 已经在 Java 工作流中锁定，模型不需要看到其他主题才能生成当前主题的 ResearchResult。
+     * 这里故意不接收 {@link Plan}，以防后续重构重新把完整计划附带到每个并行研究请求中。</p>
+     *
+     * @param question 用户的原始学习目标
+     * @param item 当前锁定且唯一允许研究的主题
+     * @return 可直接作为 ChatClient user message 的上下文
+     */
+    static String researchUserContent(String question, PlanItem item) {
+        return "用户目标：\n" + question + "\n\n当前主题：\n" + json(item);
     }
 
     /**
@@ -275,7 +336,7 @@ public class OpenAiCompatibleLlmService implements LlmService {
     }
 
     /** JSON 仅作为 Prompt 上下文，结构化响应仍由 Spring AI 直接映射。 */
-    private String json(Object value) {
+    private static String json(Object value) {
         try { return new com.fasterxml.jackson.databind.ObjectMapper().writeValueAsString(value); }
         catch (com.fasterxml.jackson.core.JsonProcessingException ex) { throw new IllegalStateException("构建模型上下文失败", ex); }
     }

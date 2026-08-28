@@ -7,13 +7,13 @@ spring:
   ai:
     openai:
       # 仅在 openai profile 启用；密钥始终从环境变量读取，默认空值使离线模板模式可启动。
-      api-key: ${OPENAI_API_KEY:sk-3NueryUyfm0qewN9sY78hwcM2Pq4l7NGJZ5EqXEdLWR9vW6j}
+      api-key: ${OPENAI_API_KEY:sk-uG93vRV5V2Dog95J15FfCdE5DaAe438fBb17C642F2E1Ae57}
       # 支持官方服务及 OpenAI-compatible 服务；适配器会补全缺失的 /v1 后缀。
       base-url: ${OPENAI_BASE_URL:https://ai2-api.i-tudou.com}
       chat:
         options:
           # 默认模型名可按供应商替换，不将某个厂商模型硬编码到 Java 业务代码中。
-          model: ${OPENAI_MODEL:gpt-5.4}
+          model: ${OPENAI_MODEL:gpt-5.6-terra}
 
 server:
   # 后端 REST/SSE 监听端口；前端 Vite 开发代理默认转发到此端口。

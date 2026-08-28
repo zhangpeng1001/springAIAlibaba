@@ -1,6 +1,7 @@
 package com.example.agent.llm;
 
 import com.example.agent.model.ResearchResult;
+import com.example.agent.model.PlanItem;
 import com.fasterxml.jackson.databind.MapperFeature;
 import com.fasterxml.jackson.databind.json.JsonMapper;
 import org.junit.jupiter.api.Test;
@@ -11,6 +12,8 @@ import org.junit.jupiter.params.provider.Arguments;
 import org.junit.jupiter.params.provider.MethodSource;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 
 /**
  * 验证 OpenAI-compatible 根地址规范化规则。
@@ -40,6 +43,32 @@ class OpenAiCompatibleLlmServiceTest {
 
         assertEquals("标题2", result.details().getFirst().title());
         assertEquals("问题2", result.details().getFirst().questions().getFirst());
+    }
+
+    /**
+     * 研究请求只能包含用户目标和当前主题，不能把无关 Plan 项复制到每个并行调用中。
+     *
+     * <p>这既控制上下文规模，也避免其他主题中的策略敏感词触发上游 {@code invalid_prompt}，
+     * 导致与该主题无关的研究任务整体失败。</p>
+     */
+    @Test
+    void researchRequestContainsOnlyCurrentPlanItem() {
+        PlanItem current = new PlanItem("java-core", "Java 基础", "面向对象、集合与异常", 1, true, "深入");
+
+        String content = OpenAiCompatibleLlmService.researchUserContent("准备 Java Web 面试", current);
+
+        assertTrue(content.contains("java-core"));
+        assertTrue(content.contains("准备 Java Web 面试"));
+        assertFalse(content.contains("SQL 注入"));
+    }
+
+    /** 兼容服务的 invalid_prompt 响应必须映射为策略拒绝，而不是被错误提示为密钥或地址问题。 */
+    @Test
+    void recognizesUpstreamPromptPolicyRejection() {
+        Exception upstream = new IllegalStateException("400 - {\"error\":{\"message\":\"invalid_prompt · prompt was flagged\"}}");
+
+        assertTrue(OpenAiCompatibleLlmService.isPromptRejected(upstream));
+        assertFalse(OpenAiCompatibleLlmService.isPromptRejected(new IllegalStateException("401 unauthorized")));
     }
 
     /**
