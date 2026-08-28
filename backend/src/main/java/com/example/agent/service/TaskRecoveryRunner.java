@@ -23,7 +23,7 @@ public class TaskRecoveryRunner implements ApplicationRunner {
 
     /**
      * Spring Boot 启动回调。
-     * 人工等待态保持原状，只有可自动继续的任务才会重新提交到执行器。
+ * 终态任务保持原状，只有可自动继续的线性任务才会重新提交到执行器。
      */
     @Override
     public void run(ApplicationArguments args) {

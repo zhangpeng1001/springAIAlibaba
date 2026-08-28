@@ -2,6 +2,7 @@ package com.example.agent.persistence;
 
 import com.example.agent.config.AgentProperties;
 import com.example.agent.model.AgentState;
+import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.fasterxml.jackson.datatype.jsr310.JavaTimeModule;
 import java.io.IOException;
@@ -26,7 +27,7 @@ import org.springframework.stereotype.Component;
 public class TaskStateStore {
     /**
      * 文件状态读写日志。
-     * 仅记录 taskId、状态、节点与受控路径，不序列化完整 AgentState，避免研究内容和用户文本重复落入日志。
+     * 仅记录 taskId、状态、节点与受控路径，不序列化完整 AgentState，避免答案内容和用户文本重复落入日志。
      */
     private static final Logger log = LoggerFactory.getLogger(TaskStateStore.class);
 
@@ -40,7 +41,7 @@ public class TaskStateStore {
      */
     private final ObjectMapper mapper;
     /**
-     * 任务级可重入锁。Research/Answer 可并行运行，但同一 taskId 的读取、修改和原子替换必须串行。
+     * 任务级可重入锁。多个纲要项答案可并行运行，但同一 taskId 的读取、修改和原子替换必须串行。
      */
     private final ConcurrentHashMap<String, ReentrantLock> locks = new ConcurrentHashMap<>();
 
@@ -53,15 +54,20 @@ public class TaskStateStore {
     public TaskStateStore(AgentProperties properties) throws IOException {
         this.tasksRoot = Path.of(properties.getStorage().getRoot()).toAbsolutePath().normalize().resolve("tasks");
         Files.createDirectories(tasksRoot);
-        this.mapper = new ObjectMapper().registerModule(new JavaTimeModule());
+        this.mapper = new ObjectMapper()
+                // 旧版状态中的已删除枚举读取为 null，由恢复服务统一标记迁移失败，避免阻塞整个启动扫描。
+                .configure(DeserializationFeature.READ_UNKNOWN_ENUM_VALUES_AS_NULL, true)
+                // 旧版快照仍可能包含确认、研究和审核字段；忽略这些已废弃字段后才能落盘迁移失败状态。
+                .configure(DeserializationFeature.FAIL_ON_UNKNOWN_PROPERTIES, false)
+                .registerModule(new JavaTimeModule());
         log.info("任务状态仓库已初始化：tasksRoot={}", tasksRoot);
     }
 
     /**
      * 新建标准任务目录并持久化初始状态。
      *
-     * <p>目录在写 state.json 前全部创建，保证后续任一节点都可直接写 plans、research、answers、reviews
-     * 工件；不在这里创建 answer 目录，因为最终输出要在标题净化后由 OutputDirectoryManager 决定。</p>
+     * <p>目录在写 state.json 前全部创建，保证规划和答案节点可直接写入中间工件；
+     * 最终 answer 目录仍由标题净化后的 OutputDirectoryManager 创建。</p>
      *
      * @param state 待创建的最小合法任务状态
      */
@@ -70,9 +76,7 @@ public class TaskStateStore {
             try {
                 Path dir = taskDir(state.getTaskId());
                 Files.createDirectories(dir.resolve("plans"));
-                Files.createDirectories(dir.resolve("research"));
                 Files.createDirectories(dir.resolve("answers"));
-                Files.createDirectories(dir.resolve("reviews"));
                 writeAtomic(statePath(state.getTaskId()), state);
                 log.info("已创建任务目录和初始状态：taskId={}，status={}，directory={}", state.getTaskId(), state.getStatus(), dir);
             } catch (IOException ex) {
@@ -161,7 +165,7 @@ public class TaskStateStore {
     }
 
     /**
-     * 构造中间工件路径，例如 research/TOPIC-001.json。
+     * 构造中间工件路径，例如 answers/TOPIC-001.json。
      * 该方法仅服务于固定内部目录，最终用户可见文件必须再经过 OutputDirectoryManager 校验。
      */
     public Path file(String taskId, String subDir, String fileName) { return taskDir(taskId).resolve(subDir).resolve(fileName).normalize(); }

@@ -15,7 +15,7 @@ import org.springframework.stereotype.Component;
 public class MarkdownWriter {
     /**
      * 渲染单主题 Markdown。
-     * 标题、摘要和 sections 均来自已经通过 Answer Review 的结构化对象，避免直接拼接模型原始全文。
+     * 标题、摘要和 sections 均来自已通过结构校验的结构化对象，避免直接拼接模型原始全文。
      */
     public String answer(Answer answer) {
         StringBuilder content = new StringBuilder("# ").append(answer.title()).append("\n\n")
@@ -29,7 +29,7 @@ public class MarkdownWriter {
     /**
      * 渲染顶层 README。
      *
-     * <p>只读取已锁定的 Plan 和状态中真实写入的字段，因此 README 既是用户阅读入口，也是任务
+     * <p>只读取自动生成的 Plan 和状态中真实写入的字段，因此 README 既是用户阅读入口，也是任务
      * 输出范围和生成时间的可审计摘要。</p>
      *
      * @param state 已进入文件生成阶段的任务状态
@@ -41,7 +41,7 @@ public class MarkdownWriter {
         StringBuilder content = new StringBuilder("# ").append(state.getTitle()).append("\n\n")
                 .append("## 原始问题\n\n").append(state.getQuestion()).append("\n\n")
                 .append("## 学习目标\n\n").append(state.getCurrentPlan().goal()).append("\n\n")
-                .append("## 最终确认纲要\n\n");
+                .append("## 初始纲要\n\n");
         // 这里保留 Plan 的原始顺序；FileGenerate 也按 order 写文件，二者保持一致。
         for (PlanItem item : state.getCurrentPlan().items()) {
             content.append(item.order()).append(". ").append(item.title()).append("：")

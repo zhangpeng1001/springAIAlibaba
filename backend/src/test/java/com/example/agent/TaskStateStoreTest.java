@@ -18,8 +18,8 @@ class TaskStateStoreTest {
         AgentProperties properties = properties();
         TaskStateStore store = new TaskStateStore(properties);
         store.create(AgentState.created("task-test", "测试问题"));
-        store.update("task-test", state -> state.setStatus(TaskStatus.WAITING_USER_PLAN));
-        assertEquals(TaskStatus.WAITING_USER_PLAN, store.load("task-test").getStatus());
+        store.update("task-test", state -> state.setStatus(TaskStatus.ANALYZING));
+        assertEquals(TaskStatus.ANALYZING, store.load("task-test").getStatus());
         assertTrue(Files.exists(store.taskDir("task-test").resolve("state.json")));
     }
 

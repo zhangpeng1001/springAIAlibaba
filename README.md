@@ -1,8 +1,8 @@
 # 知识研究与 Markdown 文档生成 Agent
 
-这是一个以 Spring AI Alibaba StateGraph 为流程引擎的单机 Agent 系统：用户先审阅、反复修改并**显式确认**纲要；之后系统自动完成知识研究、审核修复、内容生成、Markdown 输出和本地状态持久化。
+这是一个以 Spring AI Alibaba StateGraph 为流程引擎的单机 Agent 系统：用户提交问题后，系统自动完成任务理解、初始纲要、逐项详细解答、标题生成、Markdown 输出和本地状态持久化。
 
-系统不使用数据库、RAG、MCP、网页搜索或浏览器工具。研究信息仅来自配置的大模型；文件系统承担任务状态和最终文档的持久化。
+系统不使用数据库、RAG、MCP、网页搜索或浏览器工具。知识内容仅来自配置的大模型；文件系统承担任务状态和最终文档的持久化。
 
 ## 技术基线
 
@@ -29,7 +29,7 @@ npm run dev
 
 访问 `http://localhost:5173`。后端默认监听 `http://localhost:8080`。
 
-默认使用离线模板 LLM，因此无需 API Key 即可验证完整 Workflow、Human Gate、SSE、审核和 Markdown 输出。它用于开发/测试，不代表真实模型知识质量。
+默认使用离线模板 LLM，因此无需 API Key 即可验证完整线性 Workflow、SSE 和 Markdown 输出。它用于开发/测试，不代表真实模型知识质量。
 
 ## 配置真实 OpenAI-compatible 模型
 
@@ -41,7 +41,7 @@ $env:OPENAI_API_KEY = "你的密钥"
 # 请填写服务根地址，不要添加 /v1；当前 Spring AI 客户端会自动追加 /v1/chat/completions。
 $env:OPENAI_BASE_URL = "https://你的兼容端点"
 $env:OPENAI_MODEL = "你的模型名"
-# 深度研究可能较慢，默认读取超时 300 秒；可按供应商响应速度调整
+# 详细解答可能较慢，默认读取超时 300 秒；可按供应商响应速度调整
 $env:LLM_READ_TIMEOUT_SECONDS = "300"
 mvn -f backend/pom.xml spring-boot:run
 ```
@@ -60,10 +60,7 @@ mvn -f backend/pom.xml spring-boot:run
 | POST | `/api/tasks` | 异步创建任务 |
 | GET | `/api/tasks` | 获取历史任务 |
 | GET | `/api/tasks/{taskId}` | 查询真实任务快照 |
-| GET | `/api/tasks/{taskId}/plan` | 查询当前纲要 |
-| GET | `/api/tasks/{taskId}/plan/versions` | 查询不可变纲要历史 |
-| POST | `/api/tasks/{taskId}/messages` | 提交纲要修改意见 |
-| POST | `/api/tasks/{taskId}/plan/confirm` | 显式确认指定版本纲要 |
+| GET | `/api/tasks/{taskId}/plan` | 查询自动生成的初始纲要 |
 | GET | `/api/tasks/{taskId}/events` | SSE 快照、实时事件与断线回放 |
 | POST | `/api/tasks/{taskId}/cancel` | 协作式取消任务 |
 
@@ -74,9 +71,7 @@ data/tasks/{taskId}/
 ├── state.json       # 原子写入的唯一任务状态来源
 ├── events.jsonl     # 带递增 eventId 的审计与 SSE 回放日志
 ├── plans/
-├── research/
-├── answers/
-└── reviews/
+└── answers/
 
 answer/{标题}/
 ├── README.md

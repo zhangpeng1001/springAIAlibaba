@@ -1,42 +1,67 @@
 # 系统架构
 
-## 职责边界
+## 线性流程
 
-StateGraph 负责节点和条件边；Java 服务负责状态校验、审核轮次、取消、文件安全与持久化；LLM 仅输出受约束的认知结果，无法决定路径或程序状态。
+系统只执行一条自动链路：
 
 ```text
-问题 → TASK_ANALYZE → PLAN_DRAFT → WAITING_USER_PLAN
-                                    │
-                    用户修改 ──────┘
-                                    │ 显式确认
-                              PLAN_LOCK → RESEARCH → RESEARCH_REVIEW
-                                                    │失败
-                                            RESEARCH_REPAIR ─┘
-                                                    │通过
-                                           ANSWER_GENERATE → ANSWER_REVIEW
-                                                    │失败
-                                             ANSWER_REPAIR ─┘
-                                                    │通过
-                                     TITLE_GENERATE → FILE_GENERATE → SUCCESS
+用户问题
+   ↓
+TASK_ANALYZE（任务理解）
+   ↓
+PLAN_DRAFT（生成初始纲要）
+   ↓
+ANSWER_GENERATE（按纲要项受限并行生成详细解答）
+   ↓
+TITLE_GENERATE（生成并净化标题）
+   ↓
+FILE_GENERATE（创建 answer/{标题}/ 并写文件）
+   ↓
+RESULT_COLLECT（返回目录路径和文件列表）
 ```
 
-`WAITING_USER_PLAN` 是 Graph 的终止分支。只有确认接口校验“当前状态、当前 Plan、客户端版本”全部一致后，自动分支才从 `PLAN_LOCK` 开始。
+不再存在人工确认、纲要修订、独立研究、研究审核、答案审核或修复回环。
+
+## 职责边界
+
+- `AgentWorkflow` 只定义固定节点顺序，不保存任务业务数据。
+- `TaskWorkflowNodes` 负责状态切换、LLM 调用、中间工件和最终文件。
+- `TaskService` 负责创建、异步提交、取消、恢复和失败兜底。
+- `TaskStateStore` 以 `data/tasks/{taskId}/state.json` 作为唯一可恢复状态源。
+- `TaskEventService` 将事件写入 `events.jsonl` 后通过 SSE 推送。
+- LLM 只能返回结构化 DTO，不能决定状态、目录或下一节点。
 
 ## 状态与恢复
 
-`state.json` 是唯一业务状态源。每次变更在任务级锁内写入临时文件，再使用原子替换；Graph 的内存状态不会承担恢复职责。启动时：
+有效状态为：`CREATED`、`ANALYZING`、`PLAN_DRAFTING`、`ANSWER_GENERATING`、
+`TITLE_GENERATING`、`FILE_GENERATING`、`SUCCESS`、`FAILED`、`CANCELLED`。
 
-- `WAITING_USER_PLAN` 保持等待；
-- Plan 修订中的任务使用已落盘 `pendingPlanFeedback` 继续；
-- 已确认/锁定的任务重新进入自动 Graph 分支；
-- 已写入的 research/answer 工件不会重复生成。
+每个节点先持久化当前状态，再执行耗时操作。答案按纲要项并行生成，单项完成后立即写入
+`answers/{topicId}.json`；恢复时已存在的答案会跳过。最终目录一经创建就写回状态，恢复会复用该目录。
 
-事件先追加到 `events.jsonl`，再分发给 SSE。连接先收到任务快照，再按 `Last-Event-ID` 或 `afterId` 回放遗漏事件。
+旧版人工确认或审核状态不参与新流程，启动恢复时会标记为 `LEGACY_WORKFLOW_UNSUPPORTED`，提示用户重新提交。
 
-## 安全和边界
+## 输出结构
 
-- 研究 Prompt 明确禁止外部搜索、URL、RAG、MCP 和伪造来源。
-- 研究与写作并行，但每次 `state.json` 修改按任务锁串行化。
-- 文件名经过 Unicode 规范化、非法字符清理、保留设备名拦截和 `answer` 根目录边界校验。
-- Review 循环最多三轮，可由 `application.yml` 配置；超过上限进入失败终态。
-- 一旦 Plan 锁定，后续阶段不允许修改范围；发现缺口只能以审核失败或异常记录呈现。
+```text
+data/tasks/{taskId}/
+├── state.json
+├── events.jsonl
+├── plans/plan-v1.json
+└── answers/{topicId}.json
+
+answer/{标题}/
+├── README.md
+├── 01-主题.md
+├── 02-主题.md
+└── metadata.json
+```
+
+`TASK_SUCCESS` SSE 事件和任务详情接口都会返回真实的 `outputDirectory` 与 `outputFiles`。
+
+## 安全与失败处理
+
+- 标题和纲要项文件名经过 Unicode 规范化、非法字符清理、保留设备名拦截和根目录边界校验。
+- LLM 返回的答案必须包含匹配的 `topicId`、标题和非空章节，否则任务失败。
+- 模型调用、JSON 解析、状态持久化和文件写入异常均固化为稳定错误码并发布 `TASK_FAILED`。
+- 取消采用协作式标记；远程调用返回后不会再推进后续节点。

@@ -23,7 +23,7 @@ agent:
   llm:
     # OpenAI-compatible 请求的 TCP 建连超时；单独配置便于区分网络不可达与模型处理较慢。
     connect-timeout-seconds: ${LLM_CONNECT_TIMEOUT_SECONDS:10}
-    # 完整响应读取超时，默认 5 分钟，覆盖深度研究响应超过 1 分钟的场景；不是工作流总时限。
+    # 完整响应读取超时，默认 5 分钟，覆盖详细解答响应较慢的场景；不是工作流总时限。
     read-timeout-seconds: ${LLM_READ_TIMEOUT_SECONDS:300}
   storage:
     # 任务状态、事件与中间工件的根目录，单机部署时是恢复任务的唯一业务状态来源。
@@ -31,19 +31,15 @@ agent:
     # 最终 Markdown 目录，必须与任务状态目录分离，防止清理中间状态误删交付结果。
     answer-root: ${AGENT_ANSWER_ROOT:./answer}
   limits:
-    # 每个审核环节的最大修复次数，避免模型输出异常时形成无限循环。
-    max-research-review-rounds: ${MAX_RESEARCH_REVIEW_ROUNDS:3}
-    max-answer-review-rounds: ${MAX_ANSWER_REVIEW_ROUNDS:3}
     # 预留给远程模型适配器的可重试上限；重试策略不由 LLM 自行决定。
     max-llm-retries: ${MAX_LLM_RETRIES:3}
     # 预留的单任务最长工作时长，部署时可配合外层任务监控执行取消。
     workflow-timeout-minutes: ${WORKFLOW_TIMEOUT_MINUTES:60}
     # 限制 API 输入与 Plan 规模，保护本地 JSON、Prompt 上下文与并行任务数量。
     max-question-length: 2000
-    max-feedback-length: 4000
     max-plan-items: 50
   executor:
-    # Research/Answer 主题允许并行的最大工作线程数；状态写入仍按任务锁串行化。
+    # 各纲要项答案允许并行的最大工作线程数；状态写入仍按任务锁串行化。
     parallelism: ${AGENT_PARALLELISM:4}
 
 logging:

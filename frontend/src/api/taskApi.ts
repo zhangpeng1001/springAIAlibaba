@@ -17,8 +17,6 @@ export const taskApi = {
   list: () => request<TaskSummary[]>(api),
   get: (taskId: string) => request<AgentState>(`${api}/${taskId}`),
   plan: (taskId: string) => request<Plan>(`${api}/${taskId}/plan`),
-  message: (taskId: string, message: string) => request(`${api}/${taskId}/messages`, { method: "POST", body: JSON.stringify({ message }) }),
-  confirm: (taskId: string, planVersion: number) => request(`${api}/${taskId}/plan/confirm`, { method: "POST", body: JSON.stringify({ planVersion }) }),
   cancel: (taskId: string) => request(`${api}/${taskId}/cancel`, { method: "POST" })
 };
 
@@ -26,7 +24,7 @@ export const taskApi = {
 export function subscribeTask(taskId: string, onSnapshot: (state: AgentState) => void, onEvent: (event: WorkflowEvent) => void, onError: () => void): () => void {
   const source = new EventSource(`${api}/${taskId}/events`);
   source.addEventListener("TASK_SNAPSHOT", event => onSnapshot(JSON.parse((event as MessageEvent).data)));
-  const eventTypes = ["TASK_CREATED", "TASK_ANALYZED", "TASK_RECOVERY_STARTED", "PLAN_GENERATED", "PLAN_REVISION_RECEIVED", "PLAN_WAITING_USER", "PLAN_REVISED", "PLAN_CONFIRMED", "PLAN_LOCKED", "RESEARCH_STARTED", "RESEARCH_PROGRESS", "RESEARCH_REVIEWING", "RESEARCH_REVIEW_FAILED", "RESEARCH_REPAIRED", "ANSWER_STARTED", "ANSWER_PROGRESS", "ANSWER_REVIEWING", "ANSWER_REVIEW_FAILED", "ANSWER_REPAIRED", "FILE_GENERATING", "FILE_WRITTEN", "TASK_SUCCESS", "TASK_FAILED", "WORKFLOW_CANCELLED"];
+  const eventTypes = ["TASK_CREATED", "TASK_ANALYZED", "TASK_RECOVERY_STARTED", "PLAN_GENERATED", "ANSWER_STARTED", "ANSWER_PROGRESS", "TITLE_GENERATED", "FILE_GENERATING", "FILE_WRITTEN", "TASK_SUCCESS", "TASK_FAILED", "WORKFLOW_CANCELLED"];
   eventTypes.forEach(type => source.addEventListener(type, event => onEvent(JSON.parse((event as MessageEvent).data))));
   source.onerror = onError;
   return () => source.close();

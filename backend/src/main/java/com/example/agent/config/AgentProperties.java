@@ -10,7 +10,7 @@ import org.springframework.boot.context.properties.ConfigurationProperties;
 public class AgentProperties {
     /** 本地任务状态和最终 Markdown 输出的根目录配置。 */
     private Storage storage = new Storage();
-    /** 输入规模、审核回环和超时等安全上限配置。 */
+    /** 输入规模和超时等安全上限配置。 */
     private Limits limits = new Limits();
     /** 可并行调用 LLM 的最大线程数配置。 */
     private Executor executor = new Executor();
@@ -42,39 +42,27 @@ public class AgentProperties {
      * 这些值都由 Java 代码强制执行，不应交给 Prompt 或模型自行判断。
      */
     public static class Limits {
-        /** Research Review 最多允许进入 REPAIR 回边的次数。 */
-        private int maxResearchReviewRounds = 3;
-        /** Answer Review 最多允许进入 REPAIR 回边的次数。 */
-        private int maxAnswerReviewRounds = 3;
         /** 预留给真实 LLM 适配器的网络重试上限，避免瞬态网络错误立刻失败。 */
         private int maxLlmRetries = 3;
         /** 单任务允许的最长工作时长，适合在外层调度/监控中触发取消。 */
         private int workflowTimeoutMinutes = 60;
         /** 创建任务 API 的问题最大字符数，防止 Prompt 和状态文件无限膨胀。 */
         private int maxQuestionLength = 2000;
-        /** Plan 对话单条意见最大字符数，避免无界历史记录。 */
-        private int maxFeedbackLength = 4000;
         /** 单个 Plan 最大主题数，限制并行调用规模和最终文件数量。 */
         private int maxPlanItems = 50;
-        public int getMaxResearchReviewRounds() { return maxResearchReviewRounds; }
-        public void setMaxResearchReviewRounds(int value) { this.maxResearchReviewRounds = value; }
-        public int getMaxAnswerReviewRounds() { return maxAnswerReviewRounds; }
-        public void setMaxAnswerReviewRounds(int value) { this.maxAnswerReviewRounds = value; }
         public int getMaxLlmRetries() { return maxLlmRetries; }
         public void setMaxLlmRetries(int value) { this.maxLlmRetries = value; }
         public int getWorkflowTimeoutMinutes() { return workflowTimeoutMinutes; }
         public void setWorkflowTimeoutMinutes(int value) { this.workflowTimeoutMinutes = value; }
         public int getMaxQuestionLength() { return maxQuestionLength; }
         public void setMaxQuestionLength(int value) { this.maxQuestionLength = value; }
-        public int getMaxFeedbackLength() { return maxFeedbackLength; }
-        public void setMaxFeedbackLength(int value) { this.maxFeedbackLength = value; }
         public int getMaxPlanItems() { return maxPlanItems; }
         public void setMaxPlanItems(int value) { this.maxPlanItems = value; }
     }
 
     /** 并行执行配置。 */
     public static class Executor {
-        /** 同时执行主题研究/写作的最大工作线程数；状态写入仍按任务锁串行。 */
+        /** 同时执行纲要项答案生成的最大工作线程数；状态写入仍按任务锁串行。 */
         private int parallelism = 4;
         public int getParallelism() { return parallelism; }
         public void setParallelism(int parallelism) { this.parallelism = parallelism; }

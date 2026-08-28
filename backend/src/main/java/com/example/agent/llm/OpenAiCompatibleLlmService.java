@@ -4,8 +4,6 @@ import com.example.agent.exception.TaskException;
 import com.example.agent.model.Answer;
 import com.example.agent.model.Plan;
 import com.example.agent.model.PlanItem;
-import com.example.agent.model.ResearchResult;
-import com.example.agent.model.ReviewResult;
 import com.example.agent.model.TaskAnalysis;
 import com.fasterxml.jackson.databind.DeserializationFeature;
 import com.fasterxml.jackson.databind.MapperFeature;
@@ -15,7 +13,6 @@ import java.io.IOException;
 import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
-import java.util.List;
 import org.springframework.ai.chat.client.ChatClient;
 import org.springframework.ai.converter.BeanOutputConverter;
 import org.springframework.ai.converter.CompositeResponseTextCleaner;
@@ -138,73 +135,21 @@ public class OpenAiCompatibleLlmService implements LlmService {
     /** 使用任务分析 Prompt，得到结构化分类而不是让模型返回自由文本。 */
     @Override public TaskAnalysis analyze(String question) { return call("task-analyzer/system.txt", "用户问题：\n" + question, TaskAnalysis.class); }
 
-    /** 使用规划 Prompt 创建待确认的 Plan V1。 */
+    /** 使用规划 Prompt 创建唯一的初始 Plan V1。 */
     @Override public Plan draftPlan(String question) { return call("planner/system.txt", "用户问题：\n" + question, Plan.class); }
 
-    /** 把当前 Plan 和本轮反馈一起交给对话规划 Prompt，避免模型丢失现有范围。 */
-    @Override public Plan revisePlan(String question, Plan current, String feedback) {
-        return call("plan-conversation/system.txt", "用户问题：\n" + question + "\n\n当前 Plan：\n" + json(current) + "\n\n用户意见：\n" + feedback, Plan.class);
-    }
-
     /**
-     * 仅使用用户目标和当前锁定主题生成研究结果。
-     *
-     * <p>完整 Plan 已由 Java 工作流保存并锁定，研究 Agent 只需当前 PlanItem 即可确定范围；保留
-     * {@code plan} 参数是为了遵守 {@link LlmService} 的统一接口，不能将其再次拼入请求上下文。</p>
+     * 直接按纲要项生成完整详细解答。
+     * 只发送当前项、整体目标和用户问题，避免重复携带无关主题并取消独立研究调用。
      */
-    @Override public ResearchResult research(String question, Plan plan, PlanItem item) {
-        // ResearchResult 的归属与范围完全由当前 PlanItem 决定；整份 Plan 是编排层状态，重复附带会把
-        // 其他主题（例如安全、SQL 等）无关内容送到每一次请求中，既增加 token 消耗，也可能被上游策略
-        // 误判为不相关的敏感上下文。因此研究阶段只发送用户目标和当前主题的最小必要上下文。
-        return call("researcher/system.txt", researchUserContent(question, item), ResearchResult.class);
-    }
-
-    /**
-     * 将失败结果和审核意见一并交给研究修复 Prompt。
-     *
-     * <p>不能仅再次调用 {@link #research(String, Plan, PlanItem)}：那样模型不知道上一轮在哪些点
-     * 被判定遗漏或偏题，修复回边会退化为随机重试。Prompt 同时明确只处理当前主题，防止模型
-     * 为修复一个问题而改变用户已经锁定的 Plan。</p>
-     */
-    @Override public ResearchResult repairResearch(String question, Plan plan, PlanItem item, ResearchResult previous,
-                                                   List<ReviewResult.Issue> issues) {
-        // 与首次研究保持相同的最小上下文边界，避免修复单一主题时再次携带整份锁定 Plan。
-        return call("researcher/repair.txt", researchUserContent(question, item) + "\n\n上一版研究结果：\n" + json(previous)
-                + "\n\n必须解决的审核问题：\n" + json(issues), ResearchResult.class);
-    }
-
-    /** 研究审核结果仅用于覆盖、偏题等质量判断，不能修改 Plan 本身。 */
-    @Override public ReviewResult reviewResearch(Plan plan, PlanItem item, ResearchResult result) {
-        // 审核只需比较当前主题和该主题的研究结果，整份 Plan 不会影响当前主题是否达标。
-        return call("research-reviewer/system.txt", "当前主题：\n" + json(item) + "\n\n研究结果：\n" + json(result), ReviewResult.class);
-    }
-
-    /** 按审核通过的研究结果写作，禁止跳过研究直接凭原问题生成答案。 */
-    @Override public Answer generateAnswer(Plan plan, PlanItem item, ResearchResult research) {
-        // 答案只能消费已通过审核的当前主题研究结果；传入全量 Plan 不会提高答案质量，反而扩大上游请求上下文。
-        return call("answer/system.txt", "当前主题：\n" + json(item) + "\n\n研究结果：\n" + json(research), Answer.class);
-    }
-
-    /**
-     * 将上一版答案和审核缺口交给专用修复 Prompt，避免 Answer Repair 仅凭相同输入重复生成。
-     * 审核意见只用于补齐当前主题，不能据此新增或调整锁定 Plan 的其他主题。
-     */
-    @Override public Answer repairAnswer(Plan plan, PlanItem item, ResearchResult research, Answer previous,
-                                         List<ReviewResult.Issue> issues) {
-        // 修复范围由当前主题与审核意见精确约束，无需把其他主题的 Plan 项一并提交给模型。
-        return call("answer/repair.txt", "当前主题：\n" + json(item)
-                + "\n\n已审核研究结果：\n" + json(research) + "\n\n上一版答案：\n" + json(previous)
-                + "\n\n必须解决的审核问题：\n" + json(issues), Answer.class);
-    }
-
-    /** 审核单主题答案，返回失败原因供 Answer Repair 节点使用。 */
-    @Override public ReviewResult reviewAnswer(PlanItem item, Answer answer) {
-        return call("answer-reviewer/system.txt", "当前主题：\n" + json(item) + "\n\n待审核答案：\n" + json(answer), ReviewResult.class);
+    @Override public Answer generateAnswer(String question, Plan plan, PlanItem item) {
+        return call("answer/system.txt", "用户问题：\n" + question + "\n\n纲要目标：\n" + plan.goal()
+                + "\n\n当前纲要项：\n" + json(item), Answer.class);
     }
 
     /** 标题只是候选文本，文件安全由 FileNameSanitizer 在工作流节点中再次保障。 */
     @Override public String generateTitle(String question, Plan plan) {
-        return call("title/system.txt", "用户问题：\n" + question + "\n\n锁定 Plan：\n" + json(plan), String.class).trim();
+        return call("title/system.txt", "用户问题：\n" + question + "\n\n初始纲要：\n" + json(plan), String.class).trim();
     }
 
     /**
@@ -267,20 +212,6 @@ public class OpenAiCompatibleLlmService implements LlmService {
             if (normalized.contains("invalid_prompt") || normalized.contains("prompt was flagged")) return true;
         }
         return false;
-    }
-
-    /**
-     * 构造单主题研究请求的最小上下文。
-     *
-     * <p>Plan 已经在 Java 工作流中锁定，模型不需要看到其他主题才能生成当前主题的 ResearchResult。
-     * 这里故意不接收 {@link Plan}，以防后续重构重新把完整计划附带到每个并行研究请求中。</p>
-     *
-     * @param question 用户的原始学习目标
-     * @param item 当前锁定且唯一允许研究的主题
-     * @return 可直接作为 ChatClient user message 的上下文
-     */
-    static String researchUserContent(String question, PlanItem item) {
-        return "用户目标：\n" + question + "\n\n当前主题：\n" + json(item);
     }
 
     /**

@@ -21,13 +21,13 @@ public class GlobalExceptionHandler {
 
     /**
      * 映射可预期的任务业务异常。
-     * 版本冲突等状态问题使用 409，使前端可以刷新任务后提示用户重新操作。
+     * 任务终态冲突等状态问题使用 409，使前端可以刷新任务后提示用户重新操作。
      */
     @ExceptionHandler(TaskException.class)
     public ResponseEntity<ApiError> handleTask(TaskException ex) {
         HttpStatus status = switch (ex.getCode()) {
             case "TASK_NOT_FOUND" -> HttpStatus.NOT_FOUND;
-            case "TASK_INVALID", "PLAN_CONFIRM_FAILED", "PLAN_REVISION_FAILED" -> HttpStatus.CONFLICT;
+            case "TASK_INVALID" -> HttpStatus.CONFLICT;
             default -> HttpStatus.BAD_REQUEST;
         };
         log.warn("业务请求被拒绝：errorCode={}，retryable={}，message={}", ex.getCode(), ex.isRetryable(), ex.getMessage());

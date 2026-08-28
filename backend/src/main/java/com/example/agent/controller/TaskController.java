@@ -1,12 +1,9 @@
 package com.example.agent.controller;
 
 import com.example.agent.api.AcceptedTaskResponse;
-import com.example.agent.api.ConfirmPlanRequest;
 import com.example.agent.api.CreateTaskRequest;
-import com.example.agent.api.TaskMessageRequest;
 import com.example.agent.model.AgentState;
 import com.example.agent.model.Plan;
-import com.example.agent.model.PlanVersion;
 import com.example.agent.model.Task;
 import com.example.agent.service.TaskEventService;
 import com.example.agent.service.TaskService;
@@ -27,7 +24,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
 /**
- * 任务、Plan、人机对话与 SSE 的 REST 接口。
+ * 任务、只读 Plan 与 SSE 的 REST 接口。
  *
  * <p>Controller 不承载工作流判断或 LLM 调用，只负责 HTTP 校验、异步受理和返回当前真实状态；
  * 这样浏览器刷新、SSE 断线与后台执行不会改变业务规则。</p>
@@ -55,7 +52,7 @@ public class TaskController {
      * 异步创建任务。
      *
      * @param request 用户问题；Bean Validation 已在进入方法前校验空值和最大长度
-     * @return 202 与 taskId；前端应继续订阅 SSE 或查询详情，不能假设 Plan 已同步生成
+     * @return 202 与 taskId；前端应继续订阅 SSE 或查询详情，不能假设最终文件已同步生成
      */
     @PostMapping
     public ResponseEntity<AcceptedTaskResponse> create(@Valid @RequestBody CreateTaskRequest request) {
@@ -65,7 +62,7 @@ public class TaskController {
         return ResponseEntity.status(HttpStatus.ACCEPTED).body(new AcceptedTaskResponse(state.getTaskId(), state.getStatus().name()));
     }
 
-    /** 历史列表仅返回 Task 摘要，避免首页下载研究和答案全文。 */
+    /** 历史列表仅返回 Task 摘要，避免首页下载答案全文。 */
     @GetMapping public List<Task> list() {
         List<Task> tasks = taskService.list().stream().map(Task::from).toList();
         log.info("已查询任务列表：count={}", tasks.size());
@@ -79,40 +76,11 @@ public class TaskController {
         return state;
     }
 
-    /** @return 当前可见或已锁定的 Plan；不存在时返回 null 代表仍在生成初稿。 */
+    /** @return 当前自动生成的初始 Plan；不存在时返回 null 代表仍在生成初稿。 */
     @GetMapping("/{taskId}/plan") public Plan plan(@PathVariable String taskId) {
         Plan plan = taskService.get(taskId).getCurrentPlan();
         log.info("已查询当前纲要：taskId={}，planVersion={}，exists={}", taskId, plan == null ? null : plan.version(), plan != null);
         return plan;
-    }
-
-    /** @return 从 V1 到当前版本的不可变 Plan 审计列表。 */
-    @GetMapping("/{taskId}/plan/versions") public List<PlanVersion> versions(@PathVariable String taskId) {
-        List<PlanVersion> versions = taskService.get(taskId).getPlanVersions();
-        log.info("已查询纲要历史：taskId={}，versionCount={}", taskId, versions.size());
-        return versions;
-    }
-
-    /**
-     * 接收用户修改意见并异步触发 Plan 修订。
-     * 自然语言中包含“确认”也只当作一条意见，不能绕过显式确认接口。
-     */
-    @PostMapping("/{taskId}/messages")
-    public ResponseEntity<AcceptedTaskResponse> message(@PathVariable String taskId, @Valid @RequestBody TaskMessageRequest request) {
-        taskService.revisePlan(taskId, request.message());
-        log.info("已受理纲要修改：taskId={}，messageLength={}", taskId, request.message().length());
-        return ResponseEntity.accepted().body(new AcceptedTaskResponse(taskId, "PLAN_REVISING"));
-    }
-
-    /**
-     * 显式确认浏览器正在展示的 Plan 版本。
-     * 若版本已经被另一条意见更新，TaskService 会拒绝请求而不是锁定过期内容。
-     */
-    @PostMapping("/{taskId}/plan/confirm")
-    public ResponseEntity<AcceptedTaskResponse> confirm(@PathVariable String taskId, @Valid @RequestBody ConfirmPlanRequest request) {
-        taskService.confirmPlan(taskId, request.planVersion());
-        log.info("已受理纲要确认：taskId={}，planVersion={}", taskId, request.planVersion());
-        return ResponseEntity.accepted().body(new AcceptedTaskResponse(taskId, "PLAN_CONFIRMED"));
     }
 
     /**

@@ -13,5 +13,5 @@ export default function App() {
   const refreshTasks = async () => setTasks(await taskApi.list());
   useEffect(() => { void refreshTasks(); }, []);
   if (!taskId) return <HomePage tasks={tasks} onOpen={setTaskId} onCreate={async question => { const created = await taskApi.create(question); setTaskId(created.taskId); await refreshTasks(); }} />;
-  return <TaskPage task={task} events={events} error={error} onBack={() => { setTaskId(undefined); void refreshTasks(); }} onMessage={async message => { await taskApi.message(taskId, message); }} onConfirm={async () => { if (task) await taskApi.confirm(taskId, task.planVersion); }} onCancel={async () => { await taskApi.cancel(taskId); }} />;
+  return <TaskPage task={task} events={events} error={error} onBack={() => { setTaskId(undefined); void refreshTasks(); }} onCancel={async () => { await taskApi.cancel(taskId); }} />;
 }

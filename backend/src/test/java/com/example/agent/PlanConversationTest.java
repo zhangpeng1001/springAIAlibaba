@@ -3,17 +3,15 @@ package com.example.agent;
 import com.example.agent.llm.TemplateLlmService;
 import com.example.agent.model.Plan;
 import org.junit.jupiter.api.Test;
-import static org.junit.jupiter.api.Assertions.*;
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 
-/** 验证修改意见创建新版本，不会覆盖传入的旧 Plan。 */
+/** 验证离线模型可以直接生成唯一的初始纲要，不再存在 Plan 对话版本。 */
 class PlanConversationTest {
     @Test
-    void revisionIncrementsVersionAndKeepsOriginalPlan() {
-        TemplateLlmService llm = new TemplateLlmService();
-        Plan v1 = llm.draftPlan("如何学习 Java？");
-        Plan v2 = llm.revisePlan("如何学习 Java？", v1, "增加 Docker");
-        assertEquals(1, v1.version());
-        assertEquals(2, v2.version());
-        assertTrue(v2.items().stream().anyMatch(item -> item.title().contains("Docker")));
+    void createsSingleInitialPlan() {
+        Plan plan = new TemplateLlmService().draftPlan("如何学习 Java？");
+        assertEquals(1, plan.version());
+        assertFalse(plan.items().isEmpty());
     }
 }

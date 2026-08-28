@@ -17,7 +17,7 @@ public class AgentConfiguration {
     /**
      * 创建有界固定线程池。
      *
-     * <p>Research/Answer 的远程模型调用以 I/O 等待为主，允许有限并行提高吞吐；不能使用无界线程池，
+     * <p>逐项答案的远程模型调用以 I/O 等待为主，允许有限并行提高吞吐；不能使用无界线程池，
      * 否则包含大量 PlanItem 的任务会耗尽本机连接和模型限流配额。状态落盘仍由任务级锁串行化。</p>
      *
      * @param properties 并行度配置

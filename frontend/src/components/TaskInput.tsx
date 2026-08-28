@@ -11,7 +11,7 @@ export function TaskInput({ onSubmit }: { onSubmit(question: string): Promise<vo
     try { await onSubmit(question.trim()); setQuestion(""); } finally { setBusy(false); }
   }
   return <form className="task-input" onSubmit={submit}>
-    <label htmlFor="question">你想研究什么？</label>
+    <label htmlFor="question">请输入你的问题</label>
     <textarea id="question" value={question} onChange={event => setQuestion(event.target.value)} placeholder="例如：如何学习 Java 后端？" maxLength={2000} />
     <button disabled={busy}>{busy ? "正在创建…" : "开始任务"}</button>
   </form>;
